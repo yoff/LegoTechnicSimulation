@@ -1,0 +1,6 @@
+0 pin_connection.ldr – two cubes connected by a single vertex column (simulated pin)
+0 Cube A at origin; cube B shifted by (20, 0, 0) and also slightly in Z so
+0 only two corner vertices are within snap_threshold of each other, simulating
+0 a single-point (pin) contact which should become a REVOLUTE joint.
+1 4   0 0 0  1 0 0  0 1 0  0 0 1  cube.dat
+1 4  20 3 0  1 0 0  0 1 0  0 0 1  cube.dat

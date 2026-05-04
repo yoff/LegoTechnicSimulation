@@ -1,0 +1,5 @@
+0 two_bricks_adjacent.ldr – two cubes placed side by side (touching faces)
+0 Cube A is centred at (0, 0, 0); Cube B is centred at (20, 0, 0).
+0 Their +X / -X faces coincide at x = 10, so they are snapped together.
+1 4   0 0 0  1 0 0  0 1 0  0 0 1  cube.dat
+1 4  20 0 0  1 0 0  0 1 0  0 0 1  cube.dat
