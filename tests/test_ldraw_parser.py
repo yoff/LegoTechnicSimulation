@@ -112,10 +112,10 @@ def test_parse_build_triangles_transformed():
     parser = LDrawParser(parts_dir=FIXTURES)
     build = parser.parse_build(FIXTURES / "two_bricks_adjacent.ldr")
     part_b = build.parts[1]
-    # All triangles of part_b must have x-coordinates shifted by 20
+    # All triangle vertices of part_b must have floating-point coordinates
     for tri in part_b.triangles:
         for v in (tri.v0, tri.v1, tri.v2):
-            assert v[0] == pytest.approx(v[0])  # just check they're floats
+            assert np.issubdtype(type(v[0]), np.floating) or isinstance(v[0], float)
     # The x-range of part_b should be centred around x=20
     all_x = [v[0] for tri in part_b.triangles for v in (tri.v0, tri.v1, tri.v2)]
     assert min(all_x) == pytest.approx(10.0, abs=1e-6)
