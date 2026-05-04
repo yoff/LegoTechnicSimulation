@@ -1,0 +1,5 @@
+0 two_bricks_separated.ldr – two cubes far apart (no connection)
+0 Cube A is centred at (0, 0, 0); Cube B is centred at (100, 0, 0).
+0 Their bounding boxes are 80 LDU apart, well beyond any snap threshold.
+1 4    0 0 0  1 0 0  0 1 0  0 0 1  cube.dat
+1 4  100 0 0  1 0 0  0 1 0  0 0 1  cube.dat
