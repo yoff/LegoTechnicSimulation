@@ -65,6 +65,12 @@ def _download(url: str, dest: Path, label: str) -> None:
             pct = downloaded * 100 // total_size
             print(f"\r  {pct:3d}%", end="", flush=True)
 
+    # Set a User-Agent header; some servers (e.g. library.ldraw.org) reject
+    # the default "Python-urllib" agent with 403 Forbidden.
+    opener = urllib.request.build_opener()
+    opener.addheaders = [("User-Agent", "Mozilla/5.0 (LegoTechnicSimulation setup)")]
+    urllib.request.install_opener(opener)
+
     urllib.request.urlretrieve(url, dest, reporthook=_reporthook)
     print()  # newline after progress
 

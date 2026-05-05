@@ -62,6 +62,11 @@ place one you already have somewhere like:
 /path/to/ldraw
 ```
 
+> **Note:** When using the setup script with `--ldraw-dir /opt/ldraw`, the zip
+> extracts into a subdirectory, so the actual library root ends up at
+> `/opt/ldraw/ldraw`.  Use that full path when passing `--ldraw-library` to
+> `lego-technic-sim`.
+
 The parser searches the model directory first, then these directories under the configured library path:
 
 - `/path/to/ldraw`
@@ -106,8 +111,10 @@ is available:
 ```bash
 lego-technic-sim sample_models/Walker1/Walker1.ldr \
                  sample_models/Walker1/simulation.py \
-                 --ldraw-library /path/to/ldraw
+                 --ldraw-library /opt/ldraw/ldraw
 ```
+
+(Adjust the `--ldraw-library` path to wherever your LDraw library root is.)
 
 The command prints a short summary on completion:
 
@@ -125,6 +132,16 @@ After running the script above, you should have:
 - `sample_models/Walker1/simulation.py`
 
 You can run that in Blender either interactively or from the command line.
+
+### Linux system dependencies
+
+On a minimal Linux installation (e.g. a CI container or codespace), Blender
+requires several shared libraries that may not be present by default:
+
+```bash
+sudo apt-get install -y libxxf86vm1 libxfixes3 libxi6 libxrender1 \
+    libxkbcommon0 libsm6 libgl1 libepoxy0
+```
 
 ### Option 1: inside Blender
 
