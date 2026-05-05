@@ -55,7 +55,8 @@ curl -L https://yoff.github.io/lego-walker/Walker1/Walker1.ldr -o sample_models/
 
 You also need a local LDraw library containing `parts/`, `p/`, and related files.
 
-For example, place it somewhere like:
+You can download it with the included setup script (see [Setup script](#setup-script) below), or
+place one you already have somewhere like:
 
 ```text
 /path/to/ldraw
@@ -68,38 +69,53 @@ The parser searches the model directory first, then these directories under the 
 - `/path/to/ldraw/p`
 - `/path/to/ldraw/parts/s`
 
-## Run the tool on `Walker1.ldr`
+## Setup script
 
-There is not yet a checked-in CLI entrypoint in this repository, so the easiest way to run it is with a short Python script.
+`setup_env.py` downloads an LDraw parts library and/or a Blender build using
+only standard-library modules (no extra dependencies required).
 
-Create a file named `run_walker1.py`:
-
-```python
-from pathlib import Path
-
-from lego_technic_sim.blender.exporter import generate_blender_script
-from lego_technic_sim.ldraw.parser import LDrawParser
-from lego_technic_sim.physics.unit_builder import build_units_and_joints
-
-model_path = Path("sample_models/Walker1/Walker1.ldr")
-ldraw_library = Path("/path/to/ldraw")
-output_script = Path("sample_models/Walker1/simulation.py")
-
-parser = LDrawParser(parts_dir=ldraw_library)
-build = parser.parse_build(model_path)
-scene = build_units_and_joints(build)
-script = generate_blender_script(scene, output_path=output_script)
-
-print(f"Parsed {len(build.parts)} parts")
-print(f"Built {len(scene.units)} rigid units")
-print(f"Detected {len(scene.joints)} joints")
-print(f"Blender script written to {output_script}")
-```
-
-Run it:
+Download only the LDraw library:
 
 ```bash
-python run_walker1.py
+python setup_env.py --ldraw-dir /opt/ldraw
+```
+
+Download only Blender (extracted into a local directory):
+
+```bash
+python setup_env.py --blender-dir ~/apps/blender
+```
+
+Download both at once:
+
+```bash
+python setup_env.py --ldraw-dir /opt/ldraw --blender-dir ~/apps/blender
+```
+
+Specify a different Blender version (default is 4.1.0):
+
+```bash
+python setup_env.py --blender-dir ~/apps/blender --blender-version 4.2.0
+```
+
+## Run the tool on `Walker1.ldr`
+
+After installing the package (`pip install -e .`), a `lego-technic-sim` command
+is available:
+
+```bash
+lego-technic-sim sample_models/Walker1/Walker1.ldr \
+                 sample_models/Walker1/simulation.py \
+                 --ldraw-library /path/to/ldraw
+```
+
+The command prints a short summary on completion:
+
+```
+Parsed 42 parts
+Built 12 rigid units
+Detected 8 joints
+Blender script written to sample_models/Walker1/simulation.py
 ```
 
 ## Open the generated simulation in Blender
@@ -122,7 +138,6 @@ blender --background --python sample_models/Walker1/simulation.py
 
 ## Notes and limitations
 
-- The repository currently provides library functions, not a packaged command-line tool.
 - The `.ldr` file alone is not enough; referenced LDraw part files must also exist locally.
 - Joint detection is heuristic-based, so some Technic connections may need manual adjustment.
 - The generated Blender script creates proxy rigid bodies and constraints for simulation setup.

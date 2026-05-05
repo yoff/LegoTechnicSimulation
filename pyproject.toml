@@ -18,5 +18,8 @@ dev = [
     "pytest>=7",
 ]
 
+[project.scripts]
+lego-technic-sim = "lego_technic_sim.cli:main"
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
