@@ -147,12 +147,15 @@ def download_blender(dest_dir: Path, version: str = DEFAULT_BLENDER_VERSION) -> 
 
         if suffix in (".tar.xz", ".tar.gz", ".tar.bz2"):
             with tarfile.open(archive) as tf:
-                top_dir = tf.getmembers()[0].name.split("/")[0] if tf.getmembers() else ""
+                members = tf.getmembers()
+                top_dir = members[0].name.split("/")[0] if members else ""
                 tf.extractall(dest_dir)
             blender_path = dest_dir / top_dir if top_dir else dest_dir
+            print(f"Blender extracted to: {blender_path}")
         elif suffix == ".zip":
             with zipfile.ZipFile(archive) as zf:
                 zf.extractall(dest_dir)
+            print(f"Blender extracted to: {dest_dir}")
         elif filename.endswith(".dmg"):
             # Copy the DMG and instruct the user — we cannot mount without hdiutil.
             shutil.copy(archive, dest_dir / filename)
@@ -164,8 +167,6 @@ def download_blender(dest_dir: Path, version: str = DEFAULT_BLENDER_VERSION) -> 
             return
         else:
             raise RuntimeError(f"Unrecognised archive format: {filename}")
-
-    print(f"Blender extracted to: {dest_dir}")
 
 
 # ---------------------------------------------------------------------------
