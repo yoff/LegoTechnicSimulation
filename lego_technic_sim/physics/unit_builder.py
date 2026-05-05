@@ -38,6 +38,7 @@ from .mesh_properties import (
     mesh_volume_and_com,
 )
 from .model import Joint, JointType, PhysicsScene, Unit
+from .motor_detection import detect_motors
 
 # Distance threshold in LDU for two bricks to be considered "snapped".
 DEFAULT_SNAP_THRESHOLD_LDU: float = 4.0
@@ -271,4 +272,6 @@ def build_units_and_joints(
             )
         )
 
-    return PhysicsScene(units=units, joints=joints)
+    scene = PhysicsScene(units=units, joints=joints)
+    scene.motors = detect_motors(scene)
+    return scene
