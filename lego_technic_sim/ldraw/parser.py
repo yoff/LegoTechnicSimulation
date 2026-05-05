@@ -42,6 +42,8 @@ class LDrawParser:
         self.parts_dir = Path(parts_dir) if parts_dir is not None else None
         # Cache parsed triangles keyed by resolved (lower-case) file path.
         self._cache: Dict[str, List[Triangle]] = {}
+        # Inline sub-model definitions from MPD files (keyed by lower-case name).
+        self._inline_models: Dict[str, List[str]] = {}
 
     # ------------------------------------------------------------------
     # Public API
@@ -54,6 +56,9 @@ class LDrawParser:
         found in the model file.  Each part's ``triangles`` list holds the mesh
         already transformed into the build's coordinate frame.
 
+        Handles MPD (multi-part document) files by splitting on ``0 FILE``
+        directives and resolving inline sub-model references.
+
         Args:
             path: Path to the ``.ldr`` or ``.mpd`` file.
 
@@ -62,9 +67,22 @@ class LDrawParser:
         """
         path = Path(path)
         text = path.read_text(encoding="utf-8", errors="replace")
-        build = LDrawBuild(name=path.stem)
+        all_lines = text.splitlines()
+
+        # Split MPD into sub-models; use first sub-model as main.
+        models = self._split_mpd(all_lines)
+        if models:
+            main_name, main_lines = models[0]
+            # Register all inline sub-models for resolution
+            for name, lines in models[1:]:
+                self._inline_models[name.lower()] = lines
+        else:
+            main_name = path.stem
+            main_lines = all_lines
+
+        build = LDrawBuild(name=main_name)
         identity = np.eye(4)
-        for part in self._parse_parts(text.splitlines(), identity, path.parent):
+        for part in self._parse_parts(main_lines, identity, path.parent):
             build.parts.append(part)
         return build
 
@@ -92,13 +110,52 @@ class LDrawParser:
     # Internal helpers
     # ------------------------------------------------------------------
 
+    @staticmethod
+    def _split_mpd(lines: List[str]) -> List[Tuple[str, List[str]]]:
+        """Split an MPD file into named sub-models.
+
+        Returns a list of (name, lines) tuples.  If the file has no ``0 FILE``
+        directives, returns an empty list (caller should treat the whole file
+        as a single model).
+        """
+        models: List[Tuple[str, List[str]]] = []
+        current_name: Optional[str] = None
+        current_lines: List[str] = []
+
+        for line in lines:
+            stripped = line.strip()
+            upper = stripped.upper()
+            if upper.startswith("0 FILE ") or upper.startswith("0 FILE\t"):
+                # Start of a new sub-model
+                if current_name is not None:
+                    models.append((current_name, current_lines))
+                current_name = stripped[7:].strip()
+                current_lines = []
+            elif upper == "0 NOFILE":
+                if current_name is not None:
+                    models.append((current_name, current_lines))
+                    current_name = None
+                    current_lines = []
+            else:
+                current_lines.append(line)
+
+        # Final sub-model
+        if current_name is not None:
+            models.append((current_name, current_lines))
+
+        return models
+
     def _parse_parts(
         self,
         lines: List[str],
         parent_transform: np.ndarray,
         base_dir: Path,
     ) -> List[LDrawPart]:
-        """Collect all top-level ``type-1`` lines as :class:`LDrawPart` objects."""
+        """Collect all top-level ``type-1`` lines as :class:`LDrawPart` objects.
+
+        If a type-1 line references an inline sub-model (from an MPD file),
+        recursively resolves its parts with the composed transform.
+        """
         parts: List[LDrawPart] = []
         for line in lines:
             tokens = line.strip().split()
@@ -108,16 +165,24 @@ class LDrawParser:
                 continue
             color, local_t, part_file = self._parse_type1(tokens)
             world_t = parent_transform @ local_t
-            raw_tris = self._load_part_triangles(part_file, base_dir)
-            world_tris = [tri.transformed(world_t) for tri in raw_tris]
-            parts.append(
-                LDrawPart(
-                    part_id=part_file,
-                    color=color,
-                    transform=world_t,
-                    triangles=world_tris,
+
+            # Check if this references an inline sub-model
+            inline_lines = self._inline_models.get(part_file.lower())
+            if inline_lines is not None:
+                # Recursively parse sub-model parts with composed transform
+                for sub_part in self._parse_parts(inline_lines, world_t, base_dir):
+                    parts.append(sub_part)
+            else:
+                raw_tris = self._load_part_triangles(part_file, base_dir)
+                world_tris = [tri.transformed(world_t) for tri in raw_tris]
+                parts.append(
+                    LDrawPart(
+                        part_id=part_file,
+                        color=color,
+                        transform=world_t,
+                        triangles=world_tris,
+                    )
                 )
-            )
         return parts
 
     def _parse_triangles(
@@ -139,8 +204,16 @@ class LDrawParser:
                     continue
                 _, local_t, sub_file = self._parse_type1(tokens)
                 combined = parent_transform @ local_t
-                sub_tris = self._load_part_triangles(sub_file, base_dir)
-                triangles.extend(tri.transformed(combined) for tri in sub_tris)
+
+                # Check inline models for triangle resolution too
+                inline_lines = self._inline_models.get(sub_file.lower())
+                if inline_lines is not None:
+                    triangles.extend(
+                        self._parse_triangles(inline_lines, combined, base_dir)
+                    )
+                else:
+                    sub_tris = self._load_part_triangles(sub_file, base_dir)
+                    triangles.extend(tri.transformed(combined) for tri in sub_tris)
 
             elif line_type == "3":
                 # 3 colour x1 y1 z1 x2 y2 z2 x3 y3 z3
