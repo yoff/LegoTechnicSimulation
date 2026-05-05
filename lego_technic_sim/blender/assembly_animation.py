@@ -16,6 +16,7 @@ from typing import List, Optional
 
 import numpy as np
 
+from ..physics.mesh_properties import LDU_TO_METERS
 from ..physics.model import PhysicsScene, Unit
 
 
@@ -66,7 +67,7 @@ def generate_assembly_animation(
         positions_arr = np.array(all_positions)
         scene_center = positions_arr.mean(axis=0)
         scene_extent = positions_arr.max(axis=0) - positions_arr.min(axis=0)
-        cam_distance = float(np.linalg.norm(scene_extent)) * 2.5 + 0.5
+        cam_distance = float(np.linalg.norm(scene_extent)) * 1.2 + 0.1
     else:
         scene_center = np.zeros(3)
         cam_distance = 5.0
@@ -163,14 +164,42 @@ def generate_assembly_animation(
         safe_name = unit.name.replace('"', "")
         appear_frame = idx * frames_per_unit + 1
 
+        # Collect all triangles from all bricks in this unit,
+        # converting from LDraw LDU to Blender metres.
+        vertices: List[List[float]] = []
+        faces: List[List[int]] = []
+        vi = 0
+        for brick in unit.bricks:
+            for tri in brick.triangles:
+                v0 = _ldraw_to_blender(tri.v0) * LDU_TO_METERS
+                v1 = _ldraw_to_blender(tri.v1) * LDU_TO_METERS
+                v2 = _ldraw_to_blender(tri.v2) * LDU_TO_METERS
+                vertices.append([round(float(v0[0]), 7), round(float(v0[1]), 7), round(float(v0[2]), 7)])
+                vertices.append([round(float(v1[0]), 7), round(float(v1[1]), 7), round(float(v1[2]), 7)])
+                vertices.append([round(float(v2[0]), 7), round(float(v2[1]), 7), round(float(v2[2]), 7)])
+                faces.append([vi, vi + 1, vi + 2])
+                vi += 3
+
         emit(f"# Unit {idx}: {safe_name} (appears at frame {appear_frame})")
-        emit(
-            f"bpy.ops.mesh.primitive_cube_add("
-            f"size=0.016, "
-            f"location=({com_bl[0]:.6f}, {com_bl[1]:.6f}, {com_bl[2]:.6f}))"
-        )
-        emit("_obj = bpy.context.active_object")
-        emit(f"_obj.name = {safe_name!r}")
+
+        if vertices:
+            emit(f"_verts = {vertices!r}")
+            emit(f"_faces = {faces!r}")
+            emit(f"_mesh = bpy.data.meshes.new({safe_name + '_mesh'!r})")
+            emit("_mesh.from_pydata(_verts, [], _faces)")
+            emit("_mesh.update()")
+            emit(f"_obj = bpy.data.objects.new({safe_name!r}, _mesh)")
+            emit("bpy.context.collection.objects.link(_obj)")
+        else:
+            # Fallback: empty cube if no geometry
+            emit(
+                f"bpy.ops.mesh.primitive_cube_add("
+                f"size=0.005, "
+                f"location=({com_bl[0]:.6f}, {com_bl[1]:.6f}, {com_bl[2]:.6f}))"
+            )
+            emit("_obj = bpy.context.active_object")
+            emit(f"_obj.name = {safe_name!r}")
+
         emit()
 
         # Material with unique colour
