@@ -34,6 +34,7 @@ def generate_assembly_animation(
     resolution_x: int = 1280,
     resolution_y: int = 720,
     render_format: str = "FFMPEG",
+    cycles_samples: int = 32,
 ) -> str:
     """Generate a Blender script that renders units appearing in sequence.
 
@@ -46,6 +47,7 @@ def generate_assembly_animation(
         resolution_x:    Render width in pixels.
         resolution_y:    Render height in pixels.
         render_format:   Blender output format ('FFMPEG', 'PNG', 'JPEG').
+        cycles_samples:  Number of Cycles render samples (lower = faster).
 
     Returns:
         The generated Python script as a string.
@@ -111,7 +113,7 @@ def generate_assembly_animation(
     emit("# Use Cycles with CPU for headless compatibility")
     emit("scene.render.engine = 'CYCLES'")
     emit("scene.cycles.device = 'CPU'")
-    emit("scene.cycles.samples = 32")
+    emit(f"scene.cycles.samples = {cycles_samples}")
     emit()
 
     # ------------------------------------------------------------------

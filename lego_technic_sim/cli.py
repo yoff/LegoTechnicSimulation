@@ -66,6 +66,15 @@ def _build_parser() -> argparse.ArgumentParser:
         metavar="N",
         help="Frames between each unit appearing in assembly mode (default: 10).",
     )
+    p.add_argument(
+        "--fast",
+        action="store_true",
+        help=(
+            "Optimize for rendering speed: 1 frame per unit, low resolution "
+            "(480×270), minimal Cycles samples (4), and short hold time.  "
+            "Uses Cycles engine for headless compatibility."
+        ),
+    )
     return p
 
 
@@ -87,10 +96,22 @@ def main(argv: list[str] | None = None) -> None:
             generate_assembly_animation,
         )
 
+        frames_per_unit = args.frames_per_unit
+        kwargs = {}
+        if args.fast:
+            frames_per_unit = 1
+            kwargs.update(
+                hold_frames=5,
+                resolution_x=480,
+                resolution_y=270,
+                cycles_samples=4,
+            )
+
         generate_assembly_animation(
             scene,
             output_path=args.output_script,
-            frames_per_unit=args.frames_per_unit,
+            frames_per_unit=frames_per_unit,
+            **kwargs,
         )
     else:
         from lego_technic_sim.blender.exporter import generate_blender_script
