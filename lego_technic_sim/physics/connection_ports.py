@@ -108,6 +108,8 @@ _ROUND_HOLE_PRIMITIVES: FrozenSet[str] = frozenset({
     "dconnhole.dat",
     "dnpeghole.dat",
     "wpinhole.dat",
+    # Beam holes are round (contain peghole.dat internally)
+    "beamhole.dat", "beamhol2.dat",
     # npeghol variants (negative peg holes — still round)
     "npeghol2.dat", "npeghol3.dat", "npeghol3a.dat", "npeghol4.dat",
     "npeghol4a.dat", "npeghol5.dat", "npeghol6.dat", "npeghol6a.dat",
@@ -128,7 +130,6 @@ _AXLE_HOLE_PRIMITIVES: FrozenSet[str] = frozenset({
     "axl2hole.dat", "axl3hole.dat", "axl4hole.dat",
     "daxlehole.dat",
     "axleend2hole.dat",
-    "beamhole.dat", "beamhol2.dat",
 })
 
 # Primitives indicating a stud (top connection point).
