@@ -67,6 +67,14 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Frames between each unit appearing in assembly mode (default: 10).",
     )
     p.add_argument(
+        "--drivetrain",
+        action="store_true",
+        help=(
+            "Generate a drive train animation showing gears spinning in "
+            "sequence from the motor/crank root outward through the gear chain."
+        ),
+    )
+    p.add_argument(
         "--fast",
         action="store_true",
         help=(
@@ -91,7 +99,38 @@ def main(argv: list[str] | None = None) -> None:
     build = parser.parse_build(args.input_model)
     scene = build_units_and_joints(build)
 
-    if args.assembly:
+    if args.drivetrain:
+        from lego_technic_sim.physics.drive_train import build_drive_train
+        from lego_technic_sim.blender.drivetrain_animation import (
+            generate_drivetrain_animation,
+        )
+
+        tree = build_drive_train(scene)
+        if tree is None:
+            print("No motor or crank found – cannot build drive train.")
+            print(f"Parsed {len(build.parts)} parts")
+            print(f"Built {len(scene.units)} rigid units")
+            print(f"Detected {len(scene.gears)} gear meshes")
+            return
+
+        kwargs = {}
+        if args.fast:
+            kwargs.update(
+                resolution_x=480,
+                resolution_y=270,
+                cycles_samples=4,
+                spin_frames=12,
+                appear_frames=2,
+            )
+
+        generate_drivetrain_animation(
+            tree,
+            output_path=args.output_script,
+            **kwargs,
+        )
+        print(f"Drive train: {len(tree.all_nodes)} gear units in chain")
+
+    elif args.assembly:
         from lego_technic_sim.blender.assembly_animation import (
             generate_assembly_animation,
         )

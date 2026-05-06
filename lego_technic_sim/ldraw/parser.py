@@ -371,8 +371,38 @@ class LDrawParser:
         if part_lines is not None:
             raw = extract_ports_recursive(part_lines, resolve_file)
             ports = deduplicate_ports(raw)
-            self._port_cache[cache_key] = ports
-            return ports
+        else:
+            ports = []
 
-        self._port_cache[cache_key] = []
-        return []
+        # Add implicit axle hole for known gear parts that lack detected ports
+        if not ports:
+            ports = self._implicit_gear_ports(cache_key)
+
+        self._port_cache[cache_key] = ports
+        return ports
+
+    def _implicit_gear_ports(self, part_file_lower: str) -> List[ConnectionPort]:
+        """Return an implicit AXLE_HOLE port for gear parts.
+
+        Many gear .dat files define their axle hole with raw geometry rather
+        than the standard axlehole.dat primitive. For known gears in the
+        GEAR_CATALOG, we synthesize a port at the origin along the rotation
+        axis.
+        """
+        from ..physics.gears import GEAR_CATALOG
+        from ..physics.connection_ports import PortType
+
+        entry = GEAR_CATALOG.get(part_file_lower)
+        if entry is None:
+            return []
+
+        _teeth, _gear_type, local_axis_idx = entry
+        orientation = np.zeros(3)
+        orientation[local_axis_idx] = 1.0
+        return [
+            ConnectionPort(
+                port_type=PortType.AXLE_HOLE,
+                position=np.zeros(3),
+                orientation=orientation,
+            )
+        ]
