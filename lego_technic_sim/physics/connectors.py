@@ -22,7 +22,9 @@ class ConnectorType(Enum):
     """Smooth pin — allows free rotation (revolute joint)."""
 
     AXLE = auto()
-    """Axle — transmits rotation; acts as a revolute joint axis."""
+    """Axle — passes through cross-shaped holes creating a rigid connection.
+    Round holes (bearings) allow free rotation, but the majority of Technic
+    connections use cross holes so we default to rigid."""
 
     AXLE_PIN = auto()
     """Combination axle + pin — axle end transmits rotation, pin end may
@@ -42,7 +44,6 @@ FRICTION_PIN_IDS: FrozenSet[str] = frozenset({
     "65304.dat",     # Technic Pin Long with Friction Ridges (2L)
     "18651.dat",     # Technic Pin with Friction Ridges and Centre Slot
     "60169.dat",     # Technic Pin 1/2 with Friction Ridges
-    "32556.dat",     # Technic Pin with Friction Ridges and Lengthwise Axle Hole
 })
 
 FRICTIONLESS_PIN_IDS: FrozenSet[str] = frozenset({
@@ -53,6 +54,7 @@ FRICTIONLESS_PIN_IDS: FrozenSet[str] = frozenset({
     "4274.dat",      # Technic Pin 1/2 without Friction Ridges
     "11214.dat",     # Technic Pin Long without Friction (3L)
     "42003.dat",     # Cross Block with 2 Pins (treated as frictionless connector)
+    "32556.dat",     # Technic Pin Long without Friction with Single Slot (3L)
 })
 
 AXLE_IDS: FrozenSet[str] = frozenset({
@@ -75,7 +77,6 @@ AXLE_IDS: FrozenSet[str] = frozenset({
 
 AXLE_PIN_IDS: FrozenSet[str] = frozenset({
     "3749.dat",      # Technic Axle Pin
-    "6536.dat",      # Technic Axle Joiner Perpendicular with 2 Holes
     "11214.dat",     # Technic Axle Pin (Long variant)
     "43093.dat",     # Technic Axle Pin with Friction (variant)
     "65098.dat",     # Technic Axle Pin with Friction Ridges
@@ -104,11 +105,11 @@ def is_connector(part_id: str) -> bool:
 def creates_rigid_connection(part_id: str) -> bool:
     """Return True if this connector creates a rigid (non-articulated) bond.
 
-    Friction pins lock parts together; frictionless pins and axles allow
-    rotation.
+    Friction pins lock parts together.  Axles pass through cross-shaped holes
+    in gears, bushings, and joiners — gripping tightly without rotation.
     """
     ctype = classify_connector(part_id)
-    return ctype == ConnectorType.FRICTION_PIN
+    return ctype in (ConnectorType.FRICTION_PIN, ConnectorType.AXLE)
 
 
 def creates_revolute_connection(part_id: str) -> bool:
@@ -116,7 +117,6 @@ def creates_revolute_connection(part_id: str) -> bool:
     ctype = classify_connector(part_id)
     return ctype in (
         ConnectorType.FRICTIONLESS_PIN,
-        ConnectorType.AXLE,
         ConnectorType.AXLE_PIN,
     )
 

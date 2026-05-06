@@ -53,12 +53,14 @@ class LDrawPart:
                    part in the build's coordinate frame.
         triangles: Triangulated mesh in the *world* (build) coordinate frame,
                    i.e. the mesh has already been transformed by *transform*.
+        ports:     Connection ports transformed to world coordinates.
     """
 
     part_id: str
     color: int
     transform: np.ndarray  # 4 × 4
     triangles: List[Triangle] = field(default_factory=list)
+    ports: List = field(default_factory=list)  # List[ConnectionPort]
 
     @property
     def position(self) -> np.ndarray:

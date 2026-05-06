@@ -2,22 +2,31 @@
 
 Algorithm overview
 ------------------
-Primary method: **Connector-based detection**
+Primary method: **Port-based connection detection**
 
 1.  Classify parts into *connectors* (pins, axles) and *structural* (beams,
     bricks, motors, gears, etc.).
 
-2.  For each connector, determine which structural parts it joins by checking
-    which structural part meshes overlap the connector's bounding box.
+2.  For each connector, compute its shaft line (world-space endpoints + axis).
 
-3.  Friction pins create *rigid* bonds (parts they connect form one unit).
-    Frictionless pins and axles create *revolute joints* between units.
+3.  For each structural part, extract typed connection ports (round holes,
+    axle holes, studs) from LDraw primitives with exact positions.
 
-4.  Union-find groups structural parts connected by rigid bonds into *units*.
+4.  Match: a structural part connects to a connector when one of its ports
+    is on the connector's shaft line AND the port orientation aligns with
+    the shaft direction.
 
-5.  Revolute connectors that span two different units become *joints*.
-    The joint axis is derived from the connector's longest mesh extent
-    (the insertion axis).
+5.  Determine connection type from port-type × connector-type:
+      - Friction pin + any hole → RIGID
+      - Frictionless pin + any hole → REVOLUTE
+      - Axle + axle_hole (cross) → RIGID
+      - Axle + round_hole → REVOLUTE
+      - Axle-pin + any hole → REVOLUTE
+
+6.  Union-find groups structural parts connected by rigid bonds into *units*.
+    Revolute connections that span two different units become *joints*.
+
+7.  Stud connections (STUD at same position as another part's port) are rigid.
 
 Fallback method: **Distance-based detection** (legacy)
 
@@ -27,12 +36,16 @@ Fallback method: **Distance-based detection** (legacy)
 
 from __future__ import annotations
 
+from collections import Counter
 from typing import Dict, List, Set, Tuple
 
 import numpy as np
 
 from ..ldraw.model import LDrawBuild, LDrawPart
+from .connection_ports import ConnectionPort, PortType
 from .connectors import (
+    ConnectorType,
+    classify_connector,
     creates_revolute_connection,
     creates_rigid_connection,
     is_connector,
@@ -51,8 +64,11 @@ DEFAULT_SNAP_THRESHOLD_LDU: float = 4.0
 # Minimum number of contact points for a joint to be classified as FIXED.
 FIXED_CONTACT_MIN: int = 3
 
-# Margin in LDU added to connector bounding boxes when finding overlapping parts.
-CONNECTOR_OVERLAP_MARGIN: float = 4.0
+# Tolerance for port position matching (LDU).
+PORT_POSITION_TOLERANCE: float = 3.0
+
+# Tolerance for port orientation alignment (cosine of max angle).
+PORT_ORIENTATION_TOLERANCE: float = 0.7  # ~45° to handle off-axis pegholes
 
 
 # ---------------------------------------------------------------------------
@@ -160,51 +176,125 @@ def _estimate_joint_axis(contacts: List[np.ndarray]) -> np.ndarray:
 
 
 # ---------------------------------------------------------------------------
-# Public API
+# Port-based connection detection
 # ---------------------------------------------------------------------------
 
 
-def _connector_axis(part: LDrawPart) -> np.ndarray:
-    """Estimate the insertion axis of a connector from its mesh extent.
+def _connector_shaft(connector: LDrawPart) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Compute the shaft line segment of a connector in world space.
 
-    The longest dimension of the connector's bounding box corresponds to
-    the pin/axle shaft direction.  Falls back to world Y if no geometry.
-    """
-    if not part.triangles:
-        return np.array([0.0, 1.0, 0.0])
-    verts = np.vstack([[t.v0, t.v1, t.v2] for t in part.triangles])
-    extent = verts.max(axis=0) - verts.min(axis=0)
-    axis_idx = int(np.argmax(extent))
-    axis = np.zeros(3)
-    axis[axis_idx] = 1.0
-    return axis
+    Returns (endpoint_a, endpoint_b, axis_unit_vector).
+    Falls back to a zero-length segment at the part origin if no geometry.
 
-
-def _find_structural_overlaps(
-    connector: LDrawPart,
-    structural_parts: List[Tuple[int, LDrawPart]],
-    margin: float = CONNECTOR_OVERLAP_MARGIN,
-) -> List[int]:
-    """Find structural part indices whose mesh overlaps the connector's bbox.
-
-    Returns the global part indices of structural parts that have at least
-    one vertex inside the connector's bounding box (expanded by *margin*).
+    The shaft direction is determined from the world-space mesh bounding box:
+    the axis with the largest extent is the insertion direction.  Triangles
+    are already stored in world coordinates, so no additional rotation is
+    needed.
     """
     if not connector.triangles:
-        return []
-    cverts = np.vstack([[t.v0, t.v1, t.v2] for t in connector.triangles])
-    cmn = cverts.min(axis=0) - margin
-    cmx = cverts.max(axis=0) + margin
+        pos = connector.position
+        return pos, pos, np.array([0.0, 1.0, 0.0])
 
-    overlapping: List[int] = []
+    verts = np.vstack([[t.v0, t.v1, t.v2] for t in connector.triangles])
+    extent = verts.max(axis=0) - verts.min(axis=0)
+    shaft_axis = int(np.argmax(extent))
+    half_length = extent[shaft_axis] / 2.0
+
+    # Vertices are already in world space — use the axis directly.
+    world_shaft = np.zeros(3)
+    world_shaft[shaft_axis] = 1.0
+
+    center = (verts.min(axis=0) + verts.max(axis=0)) / 2.0
+    ep_a = center - world_shaft * half_length
+    ep_b = center + world_shaft * half_length
+    return ep_a, ep_b, world_shaft
+
+
+def _port_on_shaft(
+    port: ConnectionPort,
+    ep_a: np.ndarray,
+    ep_b: np.ndarray,
+    shaft_dir: np.ndarray,
+    pos_tol: float = PORT_POSITION_TOLERANCE,
+    ori_tol: float = PORT_ORIENTATION_TOLERANCE,
+) -> bool:
+    """Check if a port's position lies on the shaft line and its orientation aligns."""
+    shaft_vec = ep_b - ep_a
+    shaft_len_sq = float(np.dot(shaft_vec, shaft_vec))
+
+    # Distance from port position to shaft line segment
+    v = port.position - ep_a
+    if shaft_len_sq < 1e-12:
+        dist = float(np.linalg.norm(v))
+    else:
+        t = float(np.dot(v, shaft_vec)) / shaft_len_sq
+        t = max(0.0, min(1.0, t))
+        closest = ep_a + t * shaft_vec
+        dist = float(np.linalg.norm(port.position - closest))
+
+    if dist > pos_tol:
+        return False
+
+    # Check orientation alignment (port axis should be parallel to shaft)
+    cos_angle = abs(float(np.dot(port.orientation, shaft_dir)))
+    return cos_angle >= ori_tol
+
+
+def _determine_connection_type(
+    connector_type: ConnectorType,
+    port_type: PortType,
+) -> str:
+    """Determine if a connector-port pair creates a 'rigid' or 'revolute' bond.
+
+    Returns 'rigid', 'revolute', or 'none'.
+    """
+    if connector_type == ConnectorType.FRICTION_PIN:
+        # Friction pins lock into any hole type
+        return "rigid"
+    elif connector_type == ConnectorType.FRICTIONLESS_PIN:
+        # Frictionless pins allow rotation in any hole type
+        return "revolute"
+    elif connector_type == ConnectorType.AXLE:
+        # Axle behaviour depends on hole type
+        if port_type == PortType.AXLE_HOLE:
+            return "rigid"  # Cross hole grips axle
+        elif port_type == PortType.ROUND_HOLE:
+            return "revolute"  # Round hole lets axle spin
+        else:
+            return "rigid"  # Default: treat as rigid
+    elif connector_type == ConnectorType.AXLE_PIN:
+        return "revolute"
+    return "none"
+
+
+def _find_port_connections(
+    connector: LDrawPart,
+    structural_parts: List[Tuple[int, LDrawPart]],
+) -> List[Tuple[int, str]]:
+    """Find structural parts whose ports align with a connector's shaft.
+
+    Returns list of (global_part_index, connection_type) where
+    connection_type is 'rigid' or 'revolute'.
+    """
+    ep_a, ep_b, shaft_dir = _connector_shaft(connector)
+    ctype = classify_connector(connector.part_id)
+    if ctype is None:
+        return []
+
+    connections: List[Tuple[int, str]] = []
     for idx, sp in structural_parts:
-        if not sp.triangles:
+        if not sp.ports:
             continue
-        sverts = np.vstack([[t.v0, t.v1, t.v2] for t in sp.triangles])
-        inside = np.all((sverts >= cmn) & (sverts <= cmx), axis=1)
-        if np.any(inside):
-            overlapping.append(idx)
-    return overlapping
+        for port in sp.ports:
+            if port.port_type == PortType.STUD:
+                continue  # Studs handled separately
+            if _port_on_shaft(port, ep_a, ep_b, shaft_dir):
+                conn_type = _determine_connection_type(ctype, port.port_type)
+                if conn_type != "none":
+                    connections.append((idx, conn_type))
+                    break  # One port match per part is sufficient
+
+    return connections
 
 
 def build_units_and_joints(
@@ -278,7 +368,7 @@ def _build_via_connectors(
     ldu_to_meters: float,
     margin: float,
 ) -> PhysicsScene:
-    """Build units and joints using connector part classification."""
+    """Build units and joints using port-based connection detection."""
     n_structural = len(structural_indices)
     if n_structural == 0:
         return PhysicsScene()
@@ -291,33 +381,131 @@ def _build_via_connectors(
     uf = _UnionFind(n_structural)
     structural_tuples = [(i, parts[i]) for i in structural_indices]
 
+    # Track which structural parts are touched by at least one connector
+    touched_by_connector: set = set()
+
     # Revolute connections: (local_i, local_j, connector_part)
     revolute_connections: List[Tuple[int, int, LDrawPart]] = []
 
     for ci in connector_indices:
         conn_part = parts[ci]
-        overlapping = _find_structural_overlaps(
-            conn_part, structural_tuples, margin=margin,
-        )
-        if len(overlapping) < 2:
+        connections = _find_port_connections(conn_part, structural_tuples)
+
+        if not connections:
             continue
 
-        # This connector joins the overlapping structural parts
-        if creates_rigid_connection(conn_part.part_id):
-            # Friction pin → merge all overlapping into one unit
-            first_local = global_to_local[overlapping[0]]
-            for gi in overlapping[1:]:
+        # Mark all connected parts as touched
+        for gi, _ in connections:
+            touched_by_connector.add(global_to_local[gi])
+
+        # Group connections by type
+        rigid_parts = [gi for gi, ct in connections if ct == "rigid"]
+        revolute_parts = [gi for gi, ct in connections if ct == "revolute"]
+
+        # For mixed connections (axle through both cross and round holes):
+        # - All rigid parts merge together
+        # - Each revolute part gets a revolute joint to the rigid group
+        if rigid_parts:
+            first_local = global_to_local[rigid_parts[0]]
+            for gi in rigid_parts[1:]:
                 uf.union(first_local, global_to_local[gi])
-        elif creates_revolute_connection(conn_part.part_id):
-            # Frictionless pin / axle → potential revolute joint
-            # Store all pairs for later (after units are formed)
-            for k in range(len(overlapping)):
-                for m in range(k + 1, len(overlapping)):
+            # Revolute connections go between each revolute part and the
+            # rigid group
+            for gi in revolute_parts:
+                revolute_connections.append((
+                    global_to_local[gi],
+                    first_local,
+                    conn_part,
+                ))
+        elif len(revolute_parts) >= 2:
+            # All revolute — store pairwise connections
+            for k in range(len(revolute_parts)):
+                for m in range(k + 1, len(revolute_parts)):
                     revolute_connections.append((
-                        global_to_local[overlapping[k]],
-                        global_to_local[overlapping[m]],
+                        global_to_local[revolute_parts[k]],
+                        global_to_local[revolute_parts[m]],
                         conn_part,
                     ))
+
+    # Parallel-pin rigidity: if two or more frictionless pins connect the
+    # same pair of structural parts, the connection is over-constrained and
+    # acts as a rigid link (parallel pins prevent rotation).
+    pair_pin_counts: Counter = Counter()
+    for li_a, li_b, _ in revolute_connections:
+        pair = (min(li_a, li_b), max(li_a, li_b))
+        pair_pin_counts[pair] += 1
+
+    for (li_a, li_b), count in pair_pin_counts.items():
+        if count >= 2:
+            uf.union(li_a, li_b)
+
+    # Stud merging: parts with STUD ports co-located with another part's
+    # port position are rigidly connected (brick-on-brick stacking).
+    _STUD_MATCH_TOL = 4.0  # LDU tolerance for stud-to-port alignment
+    for li in range(n_structural):
+        sp = parts[structural_indices[li]]
+        stud_ports = [p for p in sp.ports if p.port_type == PortType.STUD]
+        if not stud_ports:
+            continue
+        for other_li in range(n_structural):
+            if other_li == li:
+                continue
+            if uf.find(li) == uf.find(other_li):
+                continue  # already merged
+            other_sp = parts[structural_indices[other_li]]
+            other_holes = [p for p in other_sp.ports
+                           if p.port_type in (PortType.ROUND_HOLE, PortType.AXLE_HOLE)]
+            if not other_holes:
+                continue
+            # Check if any stud aligns with any hole on the other part
+            matched = False
+            for stud in stud_ports:
+                for hole in other_holes:
+                    d = float(np.linalg.norm(stud.position - hole.position))
+                    if d < _STUD_MATCH_TOL:
+                        matched = True
+                        break
+                if matched:
+                    break
+            if matched:
+                uf.union(li, other_li)
+                touched_by_connector.add(li)
+                touched_by_connector.add(other_li)
+
+    # Fallback for parts with no ports and no connector touching them:
+    # merge with nearest structural part via vertex proximity.
+    _SNAP_DIST_LDU = 8.0
+    for li in range(n_structural):
+        if li in touched_by_connector:
+            continue
+        sp = parts[structural_indices[li]]
+        if sp.ports:
+            continue  # Has ports — just not matched by any connector
+        if not sp.triangles:
+            continue
+        sverts = np.vstack([[t.v0, t.v1, t.v2] for t in sp.triangles])
+        best_dist = _SNAP_DIST_LDU
+        best_li = -1
+        for other_li in range(n_structural):
+            if other_li == li:
+                continue
+            other_sp = parts[structural_indices[other_li]]
+            if not other_sp.triangles:
+                continue
+            c2c = float(np.linalg.norm(sp.position - other_sp.position))
+            if c2c > 60.0:
+                continue
+            overts = np.vstack([[t.v0, t.v1, t.v2] for t in other_sp.triangles])
+            s_sample = sverts[::3] if len(sverts) > 30 else sverts
+            o_sample = overts[::3] if len(overts) > 30 else overts
+            diffs = s_sample[:, np.newaxis, :] - o_sample[np.newaxis, :, :]
+            dists_sq = np.sum(diffs ** 2, axis=2)
+            min_d = float(np.sqrt(dists_sq.min()))
+            if min_d < best_dist:
+                best_dist = min_d
+                best_li = other_li
+        if best_li >= 0:
+            uf.union(li, best_li)
 
     # Build units from union-find groups
     unit_map: Dict[int, List[int]] = {}
@@ -353,7 +541,7 @@ def _build_via_connectors(
         for li in local_indices:
             local_to_unit[li] = unit_idx
 
-    # Build revolute joints from frictionless/axle connections
+    # Build revolute joints
     joints: List[Joint] = []
     seen_pairs: Set[Tuple[int, int]] = set()
 
@@ -367,8 +555,8 @@ def _build_via_connectors(
             continue
         seen_pairs.add(pair)
 
+        _, _, shaft_dir = _connector_shaft(conn_part)
         position = conn_part.position * ldu_to_meters
-        axis = _connector_axis(conn_part)
 
         joints.append(
             Joint(
@@ -376,7 +564,7 @@ def _build_via_connectors(
                 unit_b_index=uj,
                 joint_type=JointType.REVOLUTE,
                 position=position,
-                axis=axis,
+                axis=shaft_dir,
             )
         )
 

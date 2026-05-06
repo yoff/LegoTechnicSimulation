@@ -28,6 +28,13 @@ import numpy as np
 
 from .model import LDrawBuild, LDrawPart, Triangle
 
+from ..physics.connection_ports import (
+    ConnectionPort,
+    extract_ports_from_lines,
+    extract_ports_recursive,
+    deduplicate_ports,
+)
+
 
 class LDrawParser:
     """Parse LDraw ``.ldr`` / ``.dat`` files into :class:`LDrawBuild` objects.
@@ -42,6 +49,8 @@ class LDrawParser:
         self.parts_dir = Path(parts_dir) if parts_dir is not None else None
         # Cache parsed triangles keyed by resolved (lower-case) file path.
         self._cache: Dict[str, List[Triangle]] = {}
+        # Cache parsed ports keyed by lower-case part filename.
+        self._port_cache: Dict[str, List[ConnectionPort]] = {}
         # Inline sub-model definitions from MPD files (keyed by lower-case name).
         self._inline_models: Dict[str, List[str]] = {}
 
@@ -175,12 +184,16 @@ class LDrawParser:
             else:
                 raw_tris = self._load_part_triangles(part_file, base_dir)
                 world_tris = [tri.transformed(world_t) for tri in raw_tris]
+                # Load connection ports for this part
+                local_ports = self._load_part_ports(part_file, base_dir)
+                world_ports = [p.transformed(world_t) for p in local_ports]
                 parts.append(
                     LDrawPart(
                         part_id=part_file,
                         color=color,
                         transform=world_t,
                         triangles=world_tris,
+                        ports=world_ports,
                     )
                 )
         return parts
@@ -308,4 +321,58 @@ class LDrawParser:
 
         # Part not found – return empty mesh but keep entry to avoid re-scanning.
         self._cache[cache_key] = []
+        return []
+
+    def _load_part_ports(
+        self, part_file: str, base_dir: Path
+    ) -> List[ConnectionPort]:
+        """Load and cache connection ports for *part_file*.
+
+        Uses recursive extraction to follow sub-part references (e.g.,
+        ``s/32316s01.dat``) and find hole primitives at any nesting depth.
+        Returns deduplicated ports in the part's LOCAL coordinate frame.
+        """
+        cache_key = part_file.lower()
+        if cache_key in self._port_cache:
+            return self._port_cache[cache_key]
+
+        search_dirs: List[Path] = [base_dir]
+        if self.parts_dir is not None:
+            search_dirs += [
+                self.parts_dir,
+                self.parts_dir / "parts",
+                self.parts_dir / "p",
+                self.parts_dir / "parts" / "s",
+            ]
+
+        def resolve_file(filename: str):
+            """Resolve a sub-file reference to its lines."""
+            # Normalize path separators
+            filename_norm = filename.replace("\\", "/")
+            for directory in search_dirs:
+                candidate = directory / filename_norm
+                if candidate.exists():
+                    return candidate.read_text(
+                        encoding="utf-8", errors="replace"
+                    ).splitlines()
+                # Try case-insensitive match
+                try:
+                    for entry in directory.iterdir():
+                        if entry.name.lower() == Path(filename_norm).name.lower():
+                            return entry.read_text(
+                                encoding="utf-8", errors="replace"
+                            ).splitlines()
+                except (OSError, NotADirectoryError):
+                    pass
+            return None
+
+        # Find and read the part file
+        part_lines = resolve_file(part_file)
+        if part_lines is not None:
+            raw = extract_ports_recursive(part_lines, resolve_file)
+            ports = deduplicate_ports(raw)
+            self._port_cache[cache_key] = ports
+            return ports
+
+        self._port_cache[cache_key] = []
         return []
