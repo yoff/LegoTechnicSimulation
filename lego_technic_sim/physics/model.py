@@ -113,6 +113,30 @@ class Motor:
 
 
 @dataclass
+class GearConstraint:
+    """A gear mesh constraint between two units.
+
+    When unit_a rotates by angle θ about axis_a, unit_b rotates by
+    −θ × ratio about axis_b (sign encodes external mesh reversal).
+
+    Attributes:
+        unit_a_index: Index of the first gear's unit in PhysicsScene.units.
+        unit_b_index: Index of the second gear's unit.
+        ratio:        Gear ratio (teeth_a / teeth_b).
+        axis_a:       Rotation axis of gear A in world space (unit vector).
+        axis_b:       Rotation axis of gear B in world space (unit vector).
+        position:     Mesh point in world space (metres).
+    """
+
+    unit_a_index: int
+    unit_b_index: int
+    ratio: float
+    axis_a: np.ndarray
+    axis_b: np.ndarray
+    position: np.ndarray = field(default_factory=lambda: np.zeros(3))
+
+
+@dataclass
 class PhysicsScene:
     """Complete physics scene ready for hand-off to a simulator.
 
@@ -130,6 +154,7 @@ class PhysicsScene:
     units: List[Unit] = field(default_factory=list)
     joints: List[Joint] = field(default_factory=list)
     motors: List[Motor] = field(default_factory=list)
+    gears: List[GearConstraint] = field(default_factory=list)
     gravity: np.ndarray = field(
         default_factory=lambda: np.array([0.0, -9.81, 0.0])
     )

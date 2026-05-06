@@ -121,6 +121,7 @@ def main(argv: list[str] | None = None) -> None:
     print(f"Parsed {len(build.parts)} parts")
     print(f"Built {len(scene.units)} rigid units")
     print(f"Detected {len(scene.joints)} joints")
+    print(f"Detected {len(scene.gears)} gear meshes")
     print(f"Detected {len(scene.motors)} motors")
     print(f"Blender script written to {args.output_script}")
 
