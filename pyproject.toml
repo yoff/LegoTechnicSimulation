@@ -21,5 +21,8 @@ dev = [
 [project.scripts]
 lego-technic-sim = "lego_technic_sim.cli:main"
 
+[tool.setuptools.packages.find]
+include = ["lego_technic_sim*"]
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]

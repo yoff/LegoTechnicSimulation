@@ -4,157 +4,229 @@ Physical simulation of Lego Technic builds.
 
 ## What this repository does
 
-This project parses LDraw models, groups connected parts into rigid units, detects likely joints between those units, and generates a Blender Python script for rigid-body simulation.
+This project parses LDraw (`.ldr`) models of Lego Technic builds, analyses
+their mechanical structure, and generates Blender Python scripts for
+visualisation and rigid-body physics simulation.
 
-The target model file for the example below is:
+The pipeline:
 
-- `https://yoff.github.io/lego-walker/Walker1/Walker1.ldr`
+1. **Parse** – reads an `.ldr` file and resolves all sub-part references from a
+   local LDraw parts library.
+2. **Build rigid units** – groups parts connected by friction pins, axles in
+   axle holes, and other rigid connectors into single rigid bodies.
+3. **Detect joints** – identifies revolute (hinge) joints where frictionless
+   pins or axles in round holes connect two units.
+4. **Detect motors** – recognises Technic motors (e.g. 58121.dat) and marks
+   their output shafts as driven revolute joints.
+5. **Detect gear meshes** – finds parallel and bevel gear pairs at correct
+   centre distances and computes gear ratios.
+6. **Build drive train** – traces the gear chain from the motor outward via BFS.
+7. **Generate Blender script** – outputs a self-contained Python script that
+   recreates the model in Blender with rigid-body physics, motor constraints,
+   ground plane, camera, and lighting.
+
+### Output modes
+
+| Flag | Description |
+|------|-------------|
+| *(default)* | Static scene with rigid bodies and constraints |
+| `--assembly` | Units appear one by one in an animated assembly sequence |
+| `--drivetrain` | Gears spin in sequence from motor outward |
+| `--simulate` | Full rigid-body physics simulation with gravity |
 
 ## Prerequisites
 
 - Python 3.10+
-- `git`
-- Blender, if you want to run the generated simulation script
-- An LDraw parts library on disk
+- An LDraw parts library on disk (auto-detected or specified via `--ldraw-library`)
+- [Blender](https://www.blender.org/) 4.1+ for running the generated scripts
 
-This repository can parse an `.ldr` build file directly, but referenced parts must be available locally because the parser resolves sub-files from the model directory and an optional local LDraw library path.
-
-## Setup
-
-Clone the repository:
+## Quick start
 
 ```bash
 git clone https://github.com/yoff/LegoTechnicSimulation.git
 cd LegoTechnicSimulation
+python -m venv .venv && source .venv/bin/activate
+pip install -r requirements.txt && pip install -e .
 ```
 
-Create and activate a virtual environment:
-
-```bash
-python -m venv .venv
-source .venv/bin/activate
-```
-
-Install dependencies:
-
-```bash
-pip install -r requirements.txt
-pip install -e .
-```
-
-## Download the model file
-
-Create a working directory and download the `.ldr` file:
-
-```bash
-mkdir -p sample_models/Walker1
-curl -L https://yoff.github.io/lego-walker/Walker1/Walker1.ldr -o sample_models/Walker1/Walker1.ldr
-```
-
-## Get an LDraw parts library
-
-You also need a local LDraw library containing `parts/`, `p/`, and related files.
-
-You can download it with the included setup script (see [Setup script](#setup-script) below), or
-place one you already have somewhere like:
-
-```text
-/path/to/ldraw
-```
-
-> **Note:** When using the setup script with `--ldraw-dir /opt/ldraw`, the zip
-> extracts into a subdirectory, so the actual library root ends up at
-> `/opt/ldraw/ldraw`.  Use that full path when passing `--ldraw-library` to
-> `lego-technic-sim`.
-
-The parser searches the model directory first, then these directories under the configured library path:
-
-- `/path/to/ldraw`
-- `/path/to/ldraw/parts`
-- `/path/to/ldraw/p`
-- `/path/to/ldraw/parts/s`
-
-## Setup script
-
-`setup_env.py` downloads an LDraw parts library and/or a Blender build using
-only standard-library modules (no extra dependencies required).
-
-Download only the LDraw library:
+Download the LDraw library and (optionally) Blender:
 
 ```bash
 python setup_env.py --ldraw-dir /opt/ldraw
+python setup_env.py --blender-dir ~/apps/blender   # optional
 ```
 
-Download only Blender (extracted into a local directory):
+Download a sample model:
 
 ```bash
-python setup_env.py --blender-dir ~/apps/blender
+mkdir -p sample_models/Walker1
+curl -L https://yoff.github.io/lego-walker/Walker1/Walker1.ldr \
+     -o sample_models/Walker1/Walker1.ldr
 ```
 
-Download both at once:
+## Usage
 
-```bash
-python setup_env.py --ldraw-dir /opt/ldraw --blender-dir ~/apps/blender
-```
-
-Specify a different Blender version (default is 4.1.0):
-
-```bash
-python setup_env.py --blender-dir ~/apps/blender --blender-version 4.2.0
-```
-
-## Run the tool on `Walker1.ldr`
-
-After installing the package (`pip install -e .`), a `lego-technic-sim` command
-is available:
+### Basic analysis (static scene)
 
 ```bash
 lego-technic-sim sample_models/Walker1/Walker1.ldr \
-                 sample_models/Walker1/simulation.py \
+                 /tmp/walker1.py \
                  --ldraw-library /opt/ldraw/ldraw
 ```
 
-(Adjust the `--ldraw-library` path to wherever your LDraw library root is.)
-
-The command prints a short summary on completion:
+Output:
 
 ```
 Parsed 42 parts
-Built 12 rigid units
-Detected 8 joints
-Blender script written to sample_models/Walker1/simulation.py
+Built 49 rigid units
+Detected 63 joints
+Detected 5 gear meshes
+Detected 1 motors
+Blender script written to /tmp/walker1.py
 ```
 
-## Open the generated simulation in Blender
+### Physics simulation
 
-After running the script above, you should have:
+```bash
+lego-technic-sim sample_models/Walker1/Walker1.ldr \
+                 /tmp/walker1_sim.py \
+                 --simulate --sim-frames 120
+```
 
-- `sample_models/Walker1/simulation.py`
+Add `--anchor-motor` to fix the motor in space (useful for drive-train
+testing), `--follow-motor` to track the camera on the motor unit, or
+`--follow-unit 3` to follow a specific unit.
 
-You can run that in Blender either interactively or from the command line.
+### Assembly animation
 
-### Linux system dependencies
+```bash
+lego-technic-sim sample_models/Walker1/Walker1.ldr \
+                 /tmp/walker1_assembly.py \
+                 --assembly --frames-per-unit 10
+```
 
-On a minimal Linux installation (e.g. a CI container or codespace), Blender
-requires several shared libraries that may not be present by default:
+### Drive train animation
+
+```bash
+lego-technic-sim sample_models/Walker1/Walker1.ldr \
+                 /tmp/walker1_drivetrain.py \
+                 --drivetrain
+```
+
+### Fast rendering
+
+Add `--fast` to any mode for quick preview renders (480×270, 4 Cycles
+samples):
+
+```bash
+lego-technic-sim model.ldr /tmp/out.py --simulate --fast
+```
+
+### LDraw library auto-detection
+
+If `--ldraw-library` is not provided, the tool searches these locations in
+order:
+
+1. `LDRAW_LIBRARY` environment variable
+2. `/opt/ldraw/ldraw`
+3. `/opt/ldraw`
+4. `~/ldraw`
+5. `~/LDraw`
+
+### Running in Blender
+
+```bash
+blender --background --python /tmp/walker1_sim.py
+```
+
+Or open the script in Blender's **Scripting** workspace and run it
+interactively.
+
+On minimal Linux installations, Blender may need extra system libraries:
 
 ```bash
 sudo apt-get install -y libxxf86vm1 libxfixes3 libxi6 libxrender1 \
     libxkbcommon0 libsm6 libgl1 libepoxy0
 ```
 
-### Option 1: inside Blender
+## CLI reference
 
-Open Blender, go to the **Scripting** workspace, load `sample_models/Walker1/simulation.py`, and run it.
+| Argument | Description |
+|----------|-------------|
+| `input_model` | Path to the `.ldr` model file |
+| `output_script` | Destination for the Blender Python script |
+| `--ldraw-library PATH` | LDraw parts library root (auto-detected if omitted) |
+| `--assembly` | Generate assembly animation |
+| `--frames-per-unit N` | Frames between units in assembly mode (default: 10) |
+| `--drivetrain` | Generate drive train animation |
+| `--simulate` | Generate physics simulation |
+| `--sim-frames N` | Simulation length in frames (default: 120) |
+| `--follow-unit IDX` | Camera follows the specified unit |
+| `--follow-motor [IDX]` | Camera follows a motor's unit (default: first motor) |
+| `--anchor-motor` | Fix motor units in space (passive rigid body) |
+| `--fast` | Low-resolution fast preview (480×270, 4 samples) |
 
-### Option 2: from the command line
+## Setup script
+
+`setup_env.py` downloads an LDraw parts library and/or a Blender build using
+only standard-library modules.
 
 ```bash
-blender --background --python sample_models/Walker1/simulation.py
+python setup_env.py --ldraw-dir /opt/ldraw                    # LDraw only
+python setup_env.py --blender-dir ~/apps/blender              # Blender only
+python setup_env.py --ldraw-dir /opt/ldraw --blender-dir ~/apps/blender  # both
+python setup_env.py --blender-dir ~/apps/blender --blender-version 4.2.0
+```
+
+> **Note:** The LDraw zip extracts into a subdirectory, so with `--ldraw-dir
+> /opt/ldraw` the library root ends up at `/opt/ldraw/ldraw`.
+
+## Test fixtures
+
+Minimal `.ldr` files in `tests/fixtures/` serve as integration tests for the
+physics pipeline.  See [`tests/fixtures/README.md`](tests/fixtures/README.md)
+for descriptions and rendered thumbnails.
+
+Run the test suite:
+
+```bash
+python -m pytest tests/ -v
+```
+
+## Project structure
+
+```
+lego_technic_sim/
+  ldraw/          # LDraw file parsing and model representation
+    parser.py     # .ldr parser with recursive sub-file resolution
+    model.py      # LDrawBuild, LDrawPart, Triangle dataclasses
+  physics/        # Mechanical analysis
+    unit_builder.py    # Rigid unit grouping and joint detection
+    connection_ports.py # Port extraction from LDraw primitives
+    connectors.py      # Pin/axle classification
+    gears.py           # Gear mesh detection and ratio computation
+    drive_train.py     # BFS drive tree from motor through gears
+    motor_detection.py # Motor and crank identification
+    mesh_properties.py # Mass, volume, centre-of-mass computation
+    model.py           # PhysicsScene, Unit, Joint, Motor dataclasses
+  blender/        # Blender script generation
+    exporter.py             # Physics simulation script generator
+    assembly_animation.py   # Assembly animation generator
+    drivetrain_animation.py # Drive train animation generator
+  cli.py          # Command-line interface
+tests/            # Test suite (pytest)
+  fixtures/       # Minimal .ldr test models with renders
+sample_models/    # Example Lego Technic models
 ```
 
 ## Notes and limitations
 
-- The `.ldr` file alone is not enough; referenced LDraw part files must also exist locally.
-- Joint detection is heuristic-based, so some Technic connections may need manual adjustment.
-- The generated Blender script creates proxy rigid bodies and constraints for simulation setup.
+- Referenced LDraw part files must exist locally; the `.ldr` file alone is not
+  sufficient.
+- Port-based connection detection covers standard Technic pins, axles, and
+  motor shafts.  Some exotic connectors may not be recognised.
+- Gear mesh constraints are detected but not yet enforced as physics
+  constraints in the Blender simulation (gear ratios are computed but not
+  applied as coupled constraints).
+- Rendering uses Cycles (CPU) for headless compatibility; EEVEE requires a GPU
+  display.

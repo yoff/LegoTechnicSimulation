@@ -148,19 +148,23 @@ def generate_blender_script(
     # Camera & Lighting (only when rendering)
     # ------------------------------------------------------------------
     if render:
-        # Compute scene bounds
-        all_positions = []
+        # Compute scene bounds from actual mesh geometry (in metres)
+        all_pts: list[np.ndarray] = []
         for unit in scene.units:
-            bl_pos = _ldraw_to_blender(unit.center_of_mass)
-            all_positions.append(bl_pos)
-        if all_positions:
-            positions_arr = np.array(all_positions)
-            scene_center = positions_arr.mean(axis=0)
-            scene_extent = positions_arr.max(axis=0) - positions_arr.min(axis=0)
-            cam_distance = float(np.linalg.norm(scene_extent)) * 1.2 + 0.1
+            for brick in unit.bricks:
+                for tri in brick.triangles:
+                    for v in (tri.v0, tri.v1, tri.v2):
+                        all_pts.append(_ldraw_to_blender(np.asarray(v)) * LDU_TO_METERS)
+        if all_pts:
+            pts_arr = np.array(all_pts)
+            scene_min = pts_arr.min(axis=0)
+            scene_max = pts_arr.max(axis=0)
+            scene_center = (scene_min + scene_max) / 2
+            scene_extent = scene_max - scene_min
+            cam_distance = float(np.linalg.norm(scene_extent)) * 3.0 + 0.05
         else:
             scene_center = np.zeros(3)
-            cam_distance = 5.0
+            cam_distance = 0.5
 
         cx, cy, cz = scene_center
         emit("# ── Camera ─────────────────────────────────────────────────")
@@ -179,6 +183,8 @@ def generate_blender_script(
                  f"{cz + cam_distance * 0.5:.6f}))")
         emit("_cam = bpy.context.active_object")
         emit("scene.camera = _cam")
+        emit("_cam.data.clip_start = 0.001")
+        emit("_cam.data.clip_end = 100.0")
 
         if follow_unit is None:
             emit(f"_target = mathutils.Vector(({cx:.6f}, {cy:.6f}, {cz:.6f}))")

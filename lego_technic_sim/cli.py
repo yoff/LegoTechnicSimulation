@@ -19,7 +19,28 @@ Example::
 from __future__ import annotations
 
 import argparse
+import os
 from pathlib import Path
+
+_DEFAULT_LDRAW_PATHS = [
+    Path("/opt/ldraw/ldraw"),
+    Path("/opt/ldraw"),
+    Path.home() / "ldraw",
+    Path.home() / "LDraw",
+]
+
+
+def _find_ldraw_library() -> Path | None:
+    """Auto-detect LDraw library from env var or common locations."""
+    env = os.environ.get("LDRAW_LIBRARY")
+    if env:
+        p = Path(env)
+        if p.is_dir():
+            return p
+    for p in _DEFAULT_LDRAW_PATHS:
+        if (p / "parts").is_dir():
+            return p
+    return None
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -134,7 +155,8 @@ def main(argv: list[str] | None = None) -> None:
     from lego_technic_sim.ldraw.parser import LDrawParser
     from lego_technic_sim.physics.unit_builder import build_units_and_joints
 
-    parser = LDrawParser(parts_dir=args.ldraw_library)
+    ldraw_lib = args.ldraw_library or _find_ldraw_library()
+    parser = LDrawParser(parts_dir=ldraw_lib)
     build = parser.parse_build(args.input_model)
     scene = build_units_and_joints(build)
 
