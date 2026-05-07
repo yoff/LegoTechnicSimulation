@@ -109,6 +109,11 @@ def _build_parser() -> argparse.ArgumentParser:
         ),
     )
     p.add_argument(
+        "--anchor-motor",
+        action="store_true",
+        help="Make motor units passive (fixed in space) for testing the drive train.",
+    )
+    p.add_argument(
         "--fast",
         action="store_true",
         help=(
@@ -215,6 +220,9 @@ def main(argv: list[str] | None = None) -> None:
 
         if follow_unit is not None:
             kwargs["follow_unit"] = follow_unit
+
+        if args.anchor_motor:
+            kwargs["anchor_motor"] = True
 
         generate_blender_script(scene, output_path=args.output_script, **kwargs)
 

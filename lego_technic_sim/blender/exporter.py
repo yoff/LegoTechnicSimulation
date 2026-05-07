@@ -65,6 +65,7 @@ def generate_blender_script(
     sim_frames: int = 120,
     use_mesh: bool = True,
     follow_unit: Optional[int] = None,
+    anchor_motor: bool = False,
 ) -> str:
     """Generate a Blender Python script for the given physics scene.
 
@@ -199,6 +200,13 @@ def generate_blender_script(
     # ------------------------------------------------------------------
     # Units → rigid bodies
     # ------------------------------------------------------------------
+    # Identify motor units (optionally PASSIVE to anchor the mechanism)
+    _motor_unit_indices = set()
+    if anchor_motor:
+        for motor in scene.motors:
+            joint = scene.joints[motor.joint_index]
+            _motor_unit_indices.add(joint.unit_a_index)
+
     emit("# ── Units (rigid bodies) ─────────────────────────────────────")
     emit(f"_n_units = {len(scene.units)}")
     emit("_units = []")
@@ -256,7 +264,11 @@ def generate_blender_script(
         # Ensure minimum mass so physics solver doesn't skip bodies
         mass = max(unit.mass, 0.001)
         emit(f"_obj.rigid_body.mass = {mass:.6f}")
-        emit("_obj.rigid_body.type = 'ACTIVE'")
+        # Motor units are PASSIVE (anchored) so they drive without flying away
+        if idx in _motor_unit_indices:
+            emit("_obj.rigid_body.type = 'PASSIVE'")
+        else:
+            emit("_obj.rigid_body.type = 'ACTIVE'")
         emit("_obj.rigid_body.collision_shape = 'CONVEX_HULL'")
         emit("_obj.rigid_body.friction = 0.5")
         emit("_obj.rigid_body.restitution = 0.2")
@@ -361,19 +373,44 @@ def generate_blender_script(
         emit()
 
     # ------------------------------------------------------------------
-    # Motors
+    # Motors — use dedicated MOTOR constraint (drives around local X axis)
     # ------------------------------------------------------------------
     if scene.motors:
         emit("# ── Motors ───────────────────────────────────────────────")
         emit()
         for midx, motor in enumerate(scene.motors):
-            emit(f"# Motor {midx}: drives joint {motor.joint_index}")
-            emit(f"_rbc = _joints[{motor.joint_index}].rigid_body_constraint")
-            emit("_rbc.use_motor_ang = True")
-            emit(f"_rbc.motor_ang_target_velocity = {motor.speed:.6f}")
-            # Blender's max_impulse is per-step; scale torque up for reliable driving
+            joint = scene.joints[motor.joint_index]
+            pos_bl = _ldraw_to_blender(joint.position)
+            axis_bl = _ldraw_to_blender(joint.axis)
+            axis_norm = float(np.linalg.norm(axis_bl))
+            if axis_norm > 1e-12:
+                axis_bl = axis_bl / axis_norm
+
             max_impulse = motor.max_torque * 100.0
-            emit(f"_rbc.motor_ang_max_impulse = {max_impulse:.6f}")
+            emit(f"# Motor {midx}: drives joint {motor.joint_index}")
+            emit(f"#   axis = ({axis_bl[0]:.3f}, {axis_bl[1]:.3f}, {axis_bl[2]:.3f})")
+            # Create a MOTOR constraint empty oriented so its X axis = hinge axis
+            emit(
+                f"bpy.ops.object.empty_add("
+                f"location=({pos_bl[0]:.6f}, {pos_bl[1]:.6f}, {pos_bl[2]:.6f}))"
+            )
+            emit("_mot = bpy.context.active_object")
+            emit(f"_mot.name = 'motor_{midx}'")
+            # Orient: local X must align with the rotation axis
+            emit(
+                f"_drive_axis = mathutils.Vector("
+                f"({axis_bl[0]:.6f}, {axis_bl[1]:.6f}, {axis_bl[2]:.6f}))"
+            )
+            emit("_x_axis = mathutils.Vector((1.0, 0.0, 0.0))")
+            emit("_mot_rot = _x_axis.rotation_difference(_drive_axis)")
+            emit("_mot.rotation_mode = 'QUATERNION'")
+            emit("_mot.rotation_quaternion = _mot_rot")
+            emit(f"bpy.ops.rigidbody.constraint_add(type='MOTOR')")
+            emit(f"_mot.rigid_body_constraint.object1 = _units[{joint.unit_a_index}]")
+            emit(f"_mot.rigid_body_constraint.object2 = _units[{joint.unit_b_index}]")
+            emit("_mot.rigid_body_constraint.use_motor_ang = True")
+            emit(f"_mot.rigid_body_constraint.motor_ang_target_velocity = {motor.speed:.6f}")
+            emit(f"_mot.rigid_body_constraint.motor_ang_max_impulse = {max_impulse:.6f}")
             emit()
 
     # ------------------------------------------------------------------
