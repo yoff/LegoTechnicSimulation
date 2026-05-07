@@ -1,0 +1,9 @@
+0 Motor driving a gear via axle
+0 Name: motor_gear.ldr
+0 Author: LegoTechnicSim test
+0 Expected: 2 units (motor, gear), 1 revolute joint, 1 motor
+0 Motor output shaft is along Z; axle rotated so shaft is along Z;
+0 gear at Z=30 with axle hole along Z.
+1 7 0 0 0 1 0 0 0 1 0 0 0 1 58121.dat
+1 0 0 0 10 0 0 1 0 1 0 -1 0 0 3705.dat
+1 14 0 0 30 1 0 0 0 1 0 0 0 1 3647.dat

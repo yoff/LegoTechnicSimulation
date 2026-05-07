@@ -1,0 +1,13 @@
+0 Two meshing spur gears (8T and 24T)
+0 Name: gear_mesh.ldr
+0 Author: LegoTechnicSim test
+0 Expected: 4 units (2 gears, 2 beams), 1 gear mesh (ratio 0.333)
+0 8T gear at origin, 24T gear at X=40 (center distance = 10+30 = 40 LDU).
+0 Both gears have rotation axis along Z. Axles along Z hold them.
+0 Two beams provide structural context.
+1 14 0 0 0 1 0 0 0 1 0 0 0 1 3647.dat
+1 1 40 0 0 1 0 0 0 1 0 0 0 1 3648b.dat
+1 0 0 0 0 0 0 1 0 1 0 -1 0 0 3705.dat
+1 0 40 0 0 0 0 1 0 1 0 -1 0 0 3705.dat
+1 7 0 -20 0 1 0 0 0 1 0 0 0 1 32523.dat
+1 7 0 20 0 1 0 0 0 1 0 0 0 1 32523.dat

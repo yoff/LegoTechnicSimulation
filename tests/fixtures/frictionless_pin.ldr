@@ -1,0 +1,7 @@
+0 Two beams joined by a frictionless pin
+0 Name: frictionless_pin.ldr
+0 Author: LegoTechnicSim test
+0 Expected: 2 units, 1 revolute joint
+1 7 0 0 0 1 0 0 0 1 0 0 0 1 32523.dat
+1 7 0 20 0 1 0 0 0 1 0 0 0 1 32523.dat
+1 8 0 10 0 0 1 0 -1 0 0 0 0 1 3673.dat

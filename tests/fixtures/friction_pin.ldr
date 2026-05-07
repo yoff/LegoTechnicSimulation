@@ -1,0 +1,7 @@
+0 Two beams joined by a friction pin
+0 Name: friction_pin.ldr
+0 Author: LegoTechnicSim test
+0 Expected: 1 rigid unit, 0 joints
+1 7 0 0 0 1 0 0 0 1 0 0 0 1 32523.dat
+1 7 0 20 0 1 0 0 0 1 0 0 0 1 32523.dat
+1 0 0 10 0 0 1 0 -1 0 0 0 0 1 4459.dat
