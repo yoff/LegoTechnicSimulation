@@ -6,11 +6,12 @@ It will:
 
 1. Delete any existing scene objects.
 2. Enable the Blender Rigid Body world.
-3. Create a proxy mesh object for every :class:`~lego_technic_sim.physics.model.Unit`.
+3. Create a mesh object for every :class:`~lego_technic_sim.physics.model.Unit`.
 4. Add Rigid Body Constraints (Empty objects) for every
    :class:`~lego_technic_sim.physics.model.Joint`.
 5. Configure angular-motor parameters for every
    :class:`~lego_technic_sim.physics.model.Motor`.
+6. Optionally render the simulation.
 
 Coordinate-system conversion
 -----------------------------
@@ -38,6 +39,7 @@ from typing import List, Optional
 
 import numpy as np
 
+from ..physics.mesh_properties import LDU_TO_METERS
 from ..physics.model import Joint, JointType, Motor, PhysicsScene, Unit
 
 
@@ -55,6 +57,14 @@ def generate_blender_script(
     output_path: Optional[Path] = None,
     fps: int = 60,
     gravity: Optional[np.ndarray] = None,
+    render: bool = False,
+    render_output: str = "/tmp/simulation_",
+    resolution_x: int = 1280,
+    resolution_y: int = 720,
+    cycles_samples: int = 32,
+    sim_frames: int = 120,
+    use_mesh: bool = True,
+    follow_unit: Optional[int] = None,
 ) -> str:
     """Generate a Blender Python script for the given physics scene.
 
@@ -67,6 +77,14 @@ def generate_blender_script(
                      world step rate).
         gravity:     Gravity vector in Blender space (m/s²).  Defaults to
                      ``[0, 0, -9.81]`` (downward in Blender's Z-up world).
+        render:      If True, add render commands to the script.
+        render_output: Output path for rendered animation.
+        resolution_x: Render width.
+        resolution_y: Render height.
+        cycles_samples: Cycles samples for rendering.
+        sim_frames:  Number of frames to simulate/render.
+        use_mesh:    If True, create actual part meshes; if False, use cubes.
+        follow_unit: If set, camera tracks this unit index during simulation.
 
     Returns:
         The generated Python script as a string.
@@ -87,6 +105,7 @@ def generate_blender_script(
     emit()
     emit("import bpy")
     emit("import mathutils")
+    emit("import colorsys")
     emit()
 
     # ------------------------------------------------------------------
@@ -95,22 +114,93 @@ def generate_blender_script(
     emit("# ── Scene setup ──────────────────────────────────────────────")
     emit("bpy.ops.object.select_all(action='SELECT')")
     emit("bpy.ops.object.delete(use_global=False)")
+    emit("for obj in bpy.data.objects:")
+    emit("    bpy.data.objects.remove(obj, do_unlink=True)")
     emit()
     emit("scene = bpy.context.scene")
+    emit(f"scene.frame_start = 1")
+    emit(f"scene.frame_end = {sim_frames}")
     emit(f"scene.render.fps = {fps}")
     emit("if scene.rigidbody_world:")
     emit("    bpy.ops.rigidbody.world_remove()")
     emit("bpy.ops.rigidbody.world_add()")
     emit("scene.rigidbody_world.time_scale = 1.0")
+    emit(f"scene.rigidbody_world.point_cache.frame_end = {sim_frames}")
     emit(
         f"scene.gravity = ({gravity[0]:.6f}, {gravity[1]:.6f}, {gravity[2]:.6f})"
     )
     emit()
 
+    if render:
+        emit(f"scene.render.resolution_x = {resolution_x}")
+        emit(f"scene.render.resolution_y = {resolution_y}")
+        emit(f"scene.render.filepath = {render_output!r}")
+        emit("scene.render.image_settings.file_format = 'FFMPEG'")
+        emit("scene.render.ffmpeg.format = 'MPEG4'")
+        emit("scene.render.ffmpeg.codec = 'H264'")
+        emit("scene.render.engine = 'CYCLES'")
+        emit("scene.cycles.device = 'CPU'")
+        emit(f"scene.cycles.samples = {cycles_samples}")
+        emit()
+
+    # ------------------------------------------------------------------
+    # Camera & Lighting (only when rendering)
+    # ------------------------------------------------------------------
+    if render:
+        # Compute scene bounds
+        all_positions = []
+        for unit in scene.units:
+            bl_pos = _ldraw_to_blender(unit.center_of_mass)
+            all_positions.append(bl_pos)
+        if all_positions:
+            positions_arr = np.array(all_positions)
+            scene_center = positions_arr.mean(axis=0)
+            scene_extent = positions_arr.max(axis=0) - positions_arr.min(axis=0)
+            cam_distance = float(np.linalg.norm(scene_extent)) * 1.2 + 0.1
+        else:
+            scene_center = np.zeros(3)
+            cam_distance = 5.0
+
+        cx, cy, cz = scene_center
+        emit("# ── Camera ─────────────────────────────────────────────────")
+        if follow_unit is not None:
+            # Position camera relative to the followed unit's initial position
+            follow_pos = _ldraw_to_blender(scene.units[follow_unit].center_of_mass)
+            fx, fy, fz = follow_pos
+            emit(f"bpy.ops.object.camera_add(location=("
+                 f"{fx + cam_distance * 0.4:.6f}, "
+                 f"{fy - cam_distance * 0.6:.6f}, "
+                 f"{fz + cam_distance * 0.3:.6f}))")
+        else:
+            emit(f"bpy.ops.object.camera_add(location=("
+                 f"{cx + cam_distance * 0.6:.6f}, "
+                 f"{cy - cam_distance * 0.8:.6f}, "
+                 f"{cz + cam_distance * 0.5:.6f}))")
+        emit("_cam = bpy.context.active_object")
+        emit("scene.camera = _cam")
+
+        if follow_unit is None:
+            emit(f"_target = mathutils.Vector(({cx:.6f}, {cy:.6f}, {cz:.6f}))")
+            emit("_direction = _target - _cam.location")
+            emit("_cam.rotation_euler = _direction.to_track_quat('-Z', 'Y').to_euler()")
+        emit()
+        emit("# ── Lighting ───────────────────────────────────────────────")
+        emit(f"bpy.ops.object.light_add(type='SUN', location=(0, 0, {cam_distance:.2f}))")
+        emit("_sun = bpy.context.active_object")
+        emit("_sun.data.energy = 3.0")
+        emit("world = bpy.data.worlds.get('World') or bpy.data.worlds.new('World')")
+        emit("scene.world = world")
+        emit("world.use_nodes = True")
+        emit("bg = world.node_tree.nodes.get('Background')")
+        emit("if bg:")
+        emit("    bg.inputs[0].default_value = (0.05, 0.05, 0.08, 1.0)")
+        emit()
+
     # ------------------------------------------------------------------
     # Units → rigid bodies
     # ------------------------------------------------------------------
     emit("# ── Units (rigid bodies) ─────────────────────────────────────")
+    emit(f"_n_units = {len(scene.units)}")
     emit("_units = []")
     emit()
 
@@ -118,19 +208,108 @@ def generate_blender_script(
         com_bl = _ldraw_to_blender(unit.center_of_mass)
         safe_name = unit.name.replace('"', "")
         emit(f"# Unit {idx}: {safe_name}")
-        emit(
-            f"bpy.ops.mesh.primitive_cube_add("
-            f"size=0.02, "
-            f"location=({com_bl[0]:.6f}, {com_bl[1]:.6f}, {com_bl[2]:.6f}))"
-        )
-        emit("_obj = bpy.context.active_object")
-        emit(f"_obj.name = {safe_name!r}")
+
+        if use_mesh:
+            # Create real mesh from triangles
+            vertices: List[List[float]] = []
+            faces: List[List[int]] = []
+            vi = 0
+            for brick in unit.bricks:
+                for tri in brick.triangles:
+                    v0 = _ldraw_to_blender(tri.v0) * LDU_TO_METERS
+                    v1 = _ldraw_to_blender(tri.v1) * LDU_TO_METERS
+                    v2 = _ldraw_to_blender(tri.v2) * LDU_TO_METERS
+                    vertices.append([round(float(v0[0]), 7), round(float(v0[1]), 7), round(float(v0[2]), 7)])
+                    vertices.append([round(float(v1[0]), 7), round(float(v1[1]), 7), round(float(v1[2]), 7)])
+                    vertices.append([round(float(v2[0]), 7), round(float(v2[1]), 7), round(float(v2[2]), 7)])
+                    faces.append([vi, vi + 1, vi + 2])
+                    vi += 3
+
+            if vertices:
+                emit(f"_verts = {vertices!r}")
+                emit(f"_faces = {faces!r}")
+                emit(f"_mesh = bpy.data.meshes.new({safe_name + '_mesh'!r})")
+                emit("_mesh.from_pydata(_verts, [], _faces)")
+                emit("_mesh.update()")
+                emit(f"_obj = bpy.data.objects.new({safe_name!r}, _mesh)")
+                emit("bpy.context.collection.objects.link(_obj)")
+                emit("bpy.context.view_layer.objects.active = _obj")
+                emit("_obj.select_set(True)")
+            else:
+                emit(
+                    f"bpy.ops.mesh.primitive_cube_add("
+                    f"size=0.005, "
+                    f"location=({com_bl[0]:.6f}, {com_bl[1]:.6f}, {com_bl[2]:.6f}))"
+                )
+                emit("_obj = bpy.context.active_object")
+                emit(f"_obj.name = {safe_name!r}")
+        else:
+            emit(
+                f"bpy.ops.mesh.primitive_cube_add("
+                f"size=0.02, "
+                f"location=({com_bl[0]:.6f}, {com_bl[1]:.6f}, {com_bl[2]:.6f}))"
+            )
+            emit("_obj = bpy.context.active_object")
+            emit(f"_obj.name = {safe_name!r}")
+
         emit("bpy.ops.rigidbody.object_add()")
-        emit(f"_obj.rigid_body.mass = {unit.mass:.6f}")
+        # Ensure minimum mass so physics solver doesn't skip bodies
+        mass = max(unit.mass, 0.001)
+        emit(f"_obj.rigid_body.mass = {mass:.6f}")
         emit("_obj.rigid_body.type = 'ACTIVE'")
         emit("_obj.rigid_body.collision_shape = 'CONVEX_HULL'")
+        emit("_obj.rigid_body.friction = 0.5")
+        emit("_obj.rigid_body.restitution = 0.2")
+        emit("_obj.rigid_body.linear_damping = 0.1")
+        emit("_obj.rigid_body.angular_damping = 0.3")
+
+        # Material
+        if render:
+            emit(f"_mat = bpy.data.materials.new(name='mat_{idx}')")
+            emit("_mat.use_nodes = True")
+            emit("_bsdf = _mat.node_tree.nodes.get('Principled BSDF')")
+            emit(f"_hue = {idx} / max(_n_units, 1)")
+            emit("_r, _g, _b = colorsys.hsv_to_rgb(_hue, 0.7, 0.9)")
+            emit("if _bsdf:")
+            emit("    _bsdf.inputs['Base Color'].default_value = (_r, _g, _b, 1.0)")
+            emit("_obj.data.materials.append(_mat)")
+
         emit("_units.append(_obj)")
         emit()
+
+    # ------------------------------------------------------------------
+    # Camera tracking (after units are created)
+    # ------------------------------------------------------------------
+    if render and follow_unit is not None:
+        emit("# ── Camera Track To constraint ─────────────────────────────")
+        emit("_track = _cam.constraints.new(type='TRACK_TO')")
+        emit(f"_track.target = _units[{follow_unit}]")
+        emit("_track.track_axis = 'TRACK_NEGATIVE_Z'")
+        emit("_track.up_axis = 'UP_Y'")
+        emit()
+
+    # ------------------------------------------------------------------
+    # Ground plane
+    # ------------------------------------------------------------------
+    emit("# ── Ground plane ───────────────────────────────────────────")
+    # Place ground just below the lowest unit
+    all_z = [_ldraw_to_blender(u.center_of_mass)[2] for u in scene.units]
+    ground_z = min(all_z) - 0.05 if all_z else -0.1
+    emit(f"bpy.ops.mesh.primitive_plane_add(size=2.0, location=(0, 0, {ground_z:.4f}))")
+    emit("_ground = bpy.context.active_object")
+    emit("_ground.name = 'Ground'")
+    emit("bpy.ops.rigidbody.object_add()")
+    emit("_ground.rigid_body.type = 'PASSIVE'")
+    emit("_ground.rigid_body.collision_shape = 'BOX'")
+    emit("_ground.rigid_body.friction = 0.8")
+    if render:
+        emit("_gmat = bpy.data.materials.new(name='ground_mat')")
+        emit("_gmat.use_nodes = True")
+        emit("_gbsdf = _gmat.node_tree.nodes.get('Principled BSDF')")
+        emit("if _gbsdf:")
+        emit("    _gbsdf.inputs['Base Color'].default_value = (0.3, 0.3, 0.3, 1.0)")
+        emit("_ground.data.materials.append(_gmat)")
+    emit()
 
     # ------------------------------------------------------------------
     # Joints → rigid body constraints
@@ -192,15 +371,31 @@ def generate_blender_script(
             emit(f"_rbc = _joints[{motor.joint_index}].rigid_body_constraint")
             emit("_rbc.use_motor_ang = True")
             emit(f"_rbc.motor_ang_target_velocity = {motor.speed:.6f}")
-            emit(f"_rbc.motor_ang_max_impulse = {motor.max_torque:.6f}")
+            # Blender's max_impulse is per-step; scale torque up for reliable driving
+            max_impulse = motor.max_torque * 100.0
+            emit(f"_rbc.motor_ang_max_impulse = {max_impulse:.6f}")
             emit()
 
     # ------------------------------------------------------------------
-    # Final viewport update
+    # Bake and render
     # ------------------------------------------------------------------
     emit("# ── Finalise ─────────────────────────────────────────────────")
     emit("bpy.context.view_layer.update()")
-    emit("print('LegoTechnicSimulation: scene ready.')")
+    emit("# Bake rigid body simulation")
+    emit("override = bpy.context.copy()")
+    emit("override['point_cache'] = scene.rigidbody_world.point_cache")
+    emit("with bpy.context.temp_override(**override):")
+    emit("    bpy.ops.ptcache.bake(bake=True)")
+    emit("print('Physics bake complete.')")
+
+    if render:
+        emit()
+        emit("# ── Render ─────────────────────────────────────────────────")
+        emit("print(f'Rendering {scene.frame_end} frames...')")
+        emit("bpy.ops.render.render(animation=True)")
+        emit("print('Simulation render complete.')")
+    else:
+        emit("print('LegoTechnicSimulation: scene ready.')")
 
     script = "\n".join(lines)
 

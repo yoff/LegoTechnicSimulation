@@ -37,7 +37,7 @@ Fallback method: **Distance-based detection** (legacy)
 from __future__ import annotations
 
 from collections import Counter
-from typing import Dict, List, Set, Tuple
+from typing import Dict, List, Optional, Set, Tuple
 
 import numpy as np
 
@@ -244,11 +244,19 @@ def _port_on_shaft(
 def _determine_connection_type(
     connector_type: ConnectorType,
     port_type: PortType,
+    structural_part: Optional[LDrawPart] = None,
 ) -> str:
     """Determine if a connector-port pair creates a 'rigid' or 'revolute' bond.
 
     Returns 'rigid', 'revolute', or 'none'.
     """
+    # Motor output shafts: axle holes on motors create revolute (driven) joints
+    if structural_part is not None:
+        from .motor_detection import is_motor_part
+        if is_motor_part(structural_part.part_id):
+            if port_type == PortType.AXLE_HOLE:
+                return "revolute"
+
     if connector_type == ConnectorType.FRICTION_PIN:
         # Friction pins lock into any hole type
         return "rigid"
@@ -290,7 +298,7 @@ def _find_port_connections(
             if port.port_type == PortType.STUD:
                 continue  # Studs handled separately
             if _port_on_shaft(port, ep_a, ep_b, shaft_dir):
-                conn_type = _determine_connection_type(ctype, port.port_type)
+                conn_type = _determine_connection_type(ctype, port.port_type, sp)
                 if conn_type != "none":
                     connections.append((idx, conn_type))
                     break  # One port match per part is sufficient

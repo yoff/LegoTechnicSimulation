@@ -186,4 +186,4 @@ def test_script_multiple_units():
     ast.parse(script)
     # All four units must appear
     assert "_units.append" in script
-    assert script.count("rigidbody.object_add") == 4
+    assert script.count("rigidbody.object_add") == 5  # 4 units + 1 ground

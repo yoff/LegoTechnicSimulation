@@ -75,6 +75,40 @@ def _build_parser() -> argparse.ArgumentParser:
         ),
     )
     p.add_argument(
+        "--simulate",
+        action="store_true",
+        help=(
+            "Generate and render a rigid-body physics simulation with real "
+            "meshes, joints, motors, ground plane, and gravity."
+        ),
+    )
+    p.add_argument(
+        "--sim-frames",
+        type=int,
+        default=120,
+        metavar="N",
+        help="Number of frames to simulate (default: 120, i.e. 2s at 60fps).",
+    )
+    p.add_argument(
+        "--follow-unit",
+        type=int,
+        default=None,
+        metavar="IDX",
+        help="Camera follows the specified unit index during simulation.",
+    )
+    p.add_argument(
+        "--follow-motor",
+        nargs="?",
+        const=0,
+        type=int,
+        default=None,
+        metavar="IDX",
+        help=(
+            "Camera follows the motor's unit. Optional motor index "
+            "(default: 0, i.e. first motor)."
+        ),
+    )
+    p.add_argument(
         "--fast",
         action="store_true",
         help=(
@@ -152,6 +186,38 @@ def main(argv: list[str] | None = None) -> None:
             frames_per_unit=frames_per_unit,
             **kwargs,
         )
+    elif args.simulate:
+        from lego_technic_sim.blender.exporter import generate_blender_script
+
+        sim_frames = args.sim_frames
+        kwargs = dict(
+            render=True,
+            sim_frames=sim_frames,
+        )
+        if args.fast:
+            kwargs.update(
+                resolution_x=480,
+                resolution_y=270,
+                cycles_samples=4,
+                sim_frames=min(sim_frames, 60),
+            )
+
+        # Determine follow target
+        follow_unit = args.follow_unit
+        if args.follow_motor is not None:
+            motor_idx = args.follow_motor
+            if motor_idx < len(scene.motors):
+                motor = scene.motors[motor_idx]
+                joint = scene.joints[motor.joint_index]
+                follow_unit = joint.unit_a_index
+            else:
+                print(f"Warning: motor index {motor_idx} out of range, ignoring --follow-motor")
+
+        if follow_unit is not None:
+            kwargs["follow_unit"] = follow_unit
+
+        generate_blender_script(scene, output_path=args.output_script, **kwargs)
+
     else:
         from lego_technic_sim.blender.exporter import generate_blender_script
 
