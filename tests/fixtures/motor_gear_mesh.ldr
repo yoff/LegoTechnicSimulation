@@ -1,0 +1,14 @@
+0 Motor driving 8T gear meshing with 24T gear
+0 Name: motor_gear_mesh.ldr
+0 Author: LegoTechnicSim test
+0 Expected: 3 units (motor+axle_pin, 8T gear+axle, 24T gear), 2 revolute joints, 1 motor, 1 gear mesh
+0 Motor rotated 180 around X so body extends into -Z.
+0 8T gear on motor output shaft at Z=20 (via axle along Z).
+0 24T gear at Y=40, Z=20 connected to motor round hole via axle pin.
+0 Axle pin: pin end in motor round hole (revolute), axle end grips 24T gear (rigid).
+0 Both gears rotate around Z; center distance = 10+30 = 40 LDU.
+1 7 0 0 0 1 0 0 0 -1 0 0 0 -1 58121.dat
+1 0 0 0 10 0 0 1 0 1 0 -1 0 0 3705.dat
+1 14 0 0 20 1 0 0 0 1 0 0 0 1 3647.dat
+1 1 0 40 20 1 0 0 0 1 0 0 0 1 3648b.dat
+1 0 0 40 10 0 0 1 0 1 0 -1 0 0 3749.dat

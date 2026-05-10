@@ -272,7 +272,13 @@ def _determine_connection_type(
         else:
             return "rigid"  # Default: treat as rigid
     elif connector_type == ConnectorType.AXLE_PIN:
-        return "revolute"
+        # Axle pin: pin end is frictionless (round), axle end grips cross holes
+        if port_type == PortType.AXLE_HOLE:
+            return "rigid"  # Cross hole grips the axle end
+        elif port_type == PortType.ROUND_HOLE:
+            return "revolute"  # Round hole lets pin end spin
+        else:
+            return "revolute"  # Default: treat as revolute
     return "none"
 
 

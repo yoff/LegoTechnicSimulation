@@ -76,7 +76,9 @@ def _find_root_unit(scene: PhysicsScene) -> Optional[int]:
     if scene.motors:
         motor = scene.motors[0]
         joint = scene.joints[motor.joint_index]
-        return joint.unit_a_index
+        # Start from the driven unit (unit_b), not the motor body,
+        # since the drive train follows gear meshes from the output gear.
+        return joint.unit_b_index
 
     # Look for a unit containing a motor part (may drive via gear mesh)
     for unit_idx, unit in enumerate(scene.units):

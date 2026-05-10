@@ -286,6 +286,8 @@ class LDrawParser:
         Searches *base_dir* first, then the configured LDraw library.
         Returns an empty list if the file cannot be found (non-fatal).
         """
+        # LDraw files use backslash as path separator; normalise to forward slash
+        part_file = part_file.replace("\\", "/")
         cache_key = part_file.lower()
         if cache_key in self._cache:
             return self._cache[cache_key]
