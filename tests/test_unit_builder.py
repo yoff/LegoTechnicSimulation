@@ -288,3 +288,229 @@ def test_single_brick_build():
     assert len(scene.units) == 1
     assert len(scene.joints) == 0
     assert scene.units[0].mass > 0.0
+
+
+# ---------------------------------------------------------------------------
+# Non-parallel revolute axis merging
+# ---------------------------------------------------------------------------
+
+
+def _make_pin_triangles(axis: int, center: np.ndarray, half_len: float = 20.0):
+    """Create minimal triangles for a pin with shaft along the given axis.
+
+    The bounding box must be longest along *axis* so that _connector_shaft
+    picks the correct direction.
+    """
+    from lego_technic_sim.ldraw.model import Triangle
+
+    # Thin slab whose largest extent is along *axis*.
+    lo = center.copy()
+    hi = center.copy()
+    lo[axis] -= half_len
+    hi[axis] += half_len
+    # Give a small extent (2 LDU) on the other two axes so it's not degenerate.
+    others = [i for i in range(3) if i != axis]
+    tris = []
+    for o in others:
+        lo[o] = center[o] - 1.0
+        hi[o] = center[o] + 1.0
+    # Two triangles spanning the bounding box diagonal
+    v0 = lo.copy()
+    v1 = hi.copy()
+    v2 = lo.copy(); v2[axis] = hi[axis]
+    v3 = hi.copy(); v3[axis] = lo[axis]
+    tris.append(Triangle(v0, v1, v2))
+    tris.append(Triangle(v0, v3, v1))
+    return tris
+
+
+def test_nonparallel_revolute_axes_merge_units():
+    """Two revolute joints with non-parallel axes between the same unit pair
+    over-constrain the connection — the units must be merged into one."""
+    from lego_technic_sim.physics.connection_ports import ConnectionPort, PortType
+    from tests.test_mesh_properties import make_cube_triangles
+
+    tris = make_cube_triangles()  # 20×20×20 cube centred at origin
+
+    # Beam A at origin with two holes:
+    #   [0, 0, 0] orient Y — accepts a Y-axis pin
+    #   [0, 20, 0] orient X — accepts an X-axis pin
+    beam_a = LDrawPart(
+        "beam_a.dat", 16, np.eye(4), list(tris),
+        ports=[
+            ConnectionPort(PortType.ROUND_HOLE, np.array([0.0, 0.0, 0.0]),
+                           np.array([0.0, 1.0, 0.0])),
+            ConnectionPort(PortType.ROUND_HOLE, np.array([0.0, 20.0, 0.0]),
+                           np.array([1.0, 0.0, 0.0])),
+        ],
+    )
+
+    # Beam B at [0, 40, 0] with two holes:
+    #   [0, 40, 0] orient Y — same X,Z as beam A's Y-hole (Y-axis pin line)
+    #   [40, 20, 0] orient X — same Y,Z as beam A's X-hole (X-axis pin line)
+    tf_b = np.eye(4)
+    tf_b[:3, 3] = [0, 40, 0]
+    tris_b = [t.transformed(tf_b) for t in tris]
+    beam_b = LDrawPart(
+        "beam_b.dat", 16, tf_b, tris_b,
+        ports=[
+            ConnectionPort(PortType.ROUND_HOLE, np.array([0.0, 40.0, 0.0]),
+                           np.array([0.0, 1.0, 0.0])),
+            ConnectionPort(PortType.ROUND_HOLE, np.array([40.0, 20.0, 0.0]),
+                           np.array([1.0, 0.0, 0.0])),
+        ],
+    )
+
+    # Pin 1: Y-axis pin from [0, -5, 0] to [0, 45, 0]
+    pin1_center = np.array([0.0, 20.0, 0.0])
+    pin1_tf = np.eye(4)
+    pin1_tf[:3, 3] = pin1_center
+    pin1 = LDrawPart(
+        "3673.dat", 16, pin1_tf,
+        triangles=_make_pin_triangles(axis=1, center=pin1_center, half_len=25.0),
+    )
+
+    # Pin 2: X-axis pin from [-5, 20, 0] to [45, 20, 0]
+    pin2_center = np.array([20.0, 20.0, 0.0])
+    pin2_tf = np.eye(4)
+    pin2_tf[:3, 3] = pin2_center
+    pin2 = LDrawPart(
+        "3673.dat", 16, pin2_tf,
+        triangles=_make_pin_triangles(axis=0, center=pin2_center, half_len=25.0),
+    )
+
+    build = LDrawBuild(name="nonparallel_pins", parts=[beam_a, beam_b, pin1, pin2])
+    scene = build_units_and_joints(build)
+
+    # The two beams should be merged into one unit (no joints).
+    assert len(scene.units) == 1, (
+        f"Expected 1 unit (merged), got {len(scene.units)} with "
+        f"{len(scene.joints)} joints"
+    )
+    assert len(scene.joints) == 0
+    assert len(scene.units[0].bricks) == 2  # both beams in one unit
+
+
+def test_offset_parallel_revolute_axes_merge():
+    """Parallel revolute axes at offset positions are NOT collinear — merge."""
+    from lego_technic_sim.physics.connection_ports import ConnectionPort, PortType
+    from tests.test_mesh_properties import make_cube_triangles
+
+    tris = make_cube_triangles()
+
+    # Two beams each with two Y-facing holes at different Z positions.
+    beam_a = LDrawPart(
+        "beam_a.dat", 16, np.eye(4), list(tris),
+        ports=[
+            ConnectionPort(PortType.ROUND_HOLE, np.array([0.0, 0.0, 0.0]),
+                           np.array([0.0, 1.0, 0.0])),
+            ConnectionPort(PortType.ROUND_HOLE, np.array([0.0, 0.0, 20.0]),
+                           np.array([0.0, 1.0, 0.0])),
+        ],
+    )
+
+    tf_b = np.eye(4)
+    tf_b[:3, 3] = [0, 40, 0]
+    tris_b = [t.transformed(tf_b) for t in tris]
+    beam_b = LDrawPart(
+        "beam_b.dat", 16, tf_b, tris_b,
+        ports=[
+            ConnectionPort(PortType.ROUND_HOLE, np.array([0.0, 40.0, 0.0]),
+                           np.array([0.0, 1.0, 0.0])),
+            ConnectionPort(PortType.ROUND_HOLE, np.array([0.0, 40.0, 20.0]),
+                           np.array([0.0, 1.0, 0.0])),
+        ],
+    )
+
+    # Two Y-axis pins at Z=0 and Z=20 — parallel but offset (not collinear).
+    pin1_center = np.array([0.0, 20.0, 0.0])
+    pin1_tf = np.eye(4); pin1_tf[:3, 3] = pin1_center
+    pin1 = LDrawPart(
+        "3673.dat", 16, pin1_tf,
+        triangles=_make_pin_triangles(axis=1, center=pin1_center, half_len=25.0),
+    )
+
+    pin2_center = np.array([0.0, 20.0, 20.0])
+    pin2_tf = np.eye(4); pin2_tf[:3, 3] = pin2_center
+    pin2 = LDrawPart(
+        "3673.dat", 16, pin2_tf,
+        triangles=_make_pin_triangles(axis=1, center=pin2_center, half_len=25.0),
+    )
+
+    build = LDrawBuild(name="parallel_pins", parts=[beam_a, beam_b, pin1, pin2])
+    scene = build_units_and_joints(build)
+
+    # Offset-parallel pins over-constrain the connection → merged.
+    assert len(scene.units) == 1
+    assert len(scene.joints) == 0
+
+
+def test_collinear_revolute_axes_stay_separate():
+    """Two revolute joints along the same axis line (collinear) allow rotation
+    — the units must remain separate."""
+    from lego_technic_sim.physics.connection_ports import ConnectionPort, PortType
+    from tests.test_mesh_properties import make_cube_triangles
+
+    tris = make_cube_triangles()
+
+    # Two adjacent frame parts that merge into one unit via vertex proximity.
+    # Each has one Y-facing hole on the same Y-axis line (X=0, Z=0).
+    frame_a = LDrawPart(
+        "frame_a.dat", 16, np.eye(4), list(tris),
+        ports=[
+            ConnectionPort(PortType.ROUND_HOLE, np.array([0.0, 0.0, 0.0]),
+                           np.array([0.0, 1.0, 0.0])),
+        ],
+    )
+    tf_fb = np.eye(4)
+    tf_fb[:3, 3] = [0, 20, 0]  # adjacent → merges with frame_a
+    tris_fb = [t.transformed(tf_fb) for t in tris]
+    frame_b = LDrawPart(
+        "frame_b.dat", 16, tf_fb, tris_fb,
+        ports=[
+            ConnectionPort(PortType.ROUND_HOLE, np.array([0.0, 20.0, 0.0]),
+                           np.array([0.0, 1.0, 0.0])),
+        ],
+    )
+
+    # Gear at Y=60, with two Y-facing holes on the same Y-axis line.
+    tf_g = np.eye(4)
+    tf_g[:3, 3] = [0, 60, 0]
+    tris_g = [t.transformed(tf_g) for t in tris]
+    gear = LDrawPart(
+        "gear.dat", 16, tf_g, tris_g,
+        ports=[
+            ConnectionPort(PortType.ROUND_HOLE, np.array([0.0, 50.0, 0.0]),
+                           np.array([0.0, 1.0, 0.0])),
+            ConnectionPort(PortType.ROUND_HOLE, np.array([0.0, 70.0, 0.0]),
+                           np.array([0.0, 1.0, 0.0])),
+        ],
+    )
+
+    # Pin 1: connects frame_a's hole [0,0,0] to gear's hole [0,50,0].
+    # Pin 2: connects frame_b's hole [0,20,0] to gear's hole [0,70,0].
+    # Both along Y at X=0, Z=0 — collinear.
+    # Different structural part pairs → step 3 won't merge them.
+    pin1_center = np.array([0.0, 25.0, 0.0])
+    pin1_tf = np.eye(4); pin1_tf[:3, 3] = pin1_center
+    pin1 = LDrawPart(
+        "3673.dat", 16, pin1_tf,
+        triangles=_make_pin_triangles(axis=1, center=pin1_center, half_len=30.0),
+    )
+
+    pin2_center = np.array([0.0, 45.0, 0.0])
+    pin2_tf = np.eye(4); pin2_tf[:3, 3] = pin2_center
+    pin2 = LDrawPart(
+        "3673.dat", 16, pin2_tf,
+        triangles=_make_pin_triangles(axis=1, center=pin2_center, half_len=30.0),
+    )
+
+    build = LDrawBuild(name="collinear_pins",
+                        parts=[frame_a, frame_b, gear, pin1, pin2])
+    scene = build_units_and_joints(build)
+
+    # Collinear axes share a single rotation DOF — units stay separate.
+    assert len(scene.units) == 2, (
+        f"Expected 2 units (collinear pins allow rotation), got {len(scene.units)}"
+    )
+    assert any(j.joint_type == JointType.REVOLUTE for j in scene.joints)

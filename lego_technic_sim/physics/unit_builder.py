@@ -376,6 +376,51 @@ def build_units_and_joints(
     return scene
 
 
+def _units_from_uf(
+    uf: _UnionFind,
+    n_structural: int,
+    structural_indices: List[int],
+    parts: List[LDrawPart],
+    density: float,
+    ldu_to_meters: float,
+) -> Tuple[List[Unit], Dict[int, int]]:
+    """Build unit list and local-to-unit mapping from current UnionFind state."""
+    unit_map: Dict[int, List[int]] = {}
+    for li in range(n_structural):
+        root = uf.find(li)
+        unit_map.setdefault(root, []).append(li)
+
+    units: List[Unit] = []
+    local_to_unit: Dict[int, int] = {}
+
+    for local_indices in unit_map.values():
+        global_indices = [structural_indices[li] for li in local_indices]
+        unit_bricks = [parts[gi] for gi in global_indices]
+
+        total_mass = 0.0
+        weighted_com = np.zeros(3, dtype=float)
+        for gi in global_indices:
+            vol, com = mesh_volume_and_com(parts[gi].triangles, ldu_to_meters)
+            mass = density * vol
+            total_mass += mass
+            weighted_com += mass * com
+
+        if total_mass > 0.0:
+            com = weighted_com / total_mass
+        else:
+            com = np.mean(
+                [parts[gi].position * ldu_to_meters for gi in global_indices],
+                axis=0,
+            )
+
+        unit_idx = len(units)
+        units.append(Unit(bricks=unit_bricks, mass=total_mass, center_of_mass=com))
+        for li in local_indices:
+            local_to_unit[li] = unit_idx
+
+    return units, local_to_unit
+
+
 def _build_via_connectors(
     parts: List[LDrawPart],
     connector_indices: List[int],
@@ -524,38 +569,62 @@ def _build_via_connectors(
             uf.union(li, best_li)
 
     # Build units from union-find groups
-    unit_map: Dict[int, List[int]] = {}
-    for li in range(n_structural):
-        root = uf.find(li)
-        unit_map.setdefault(root, []).append(li)
+    units, local_to_unit = _units_from_uf(
+        uf, n_structural, structural_indices, parts, density, ldu_to_meters
+    )
 
-    units: List[Unit] = []
-    local_to_unit: Dict[int, int] = {}
-
-    for local_indices in unit_map.values():
-        global_indices = [structural_indices[li] for li in local_indices]
-        unit_bricks = [parts[gi] for gi in global_indices]
-
-        total_mass = 0.0
-        weighted_com = np.zeros(3, dtype=float)
-        for gi in global_indices:
-            vol, com = mesh_volume_and_com(parts[gi].triangles, ldu_to_meters)
-            mass = density * vol
-            total_mass += mass
-            weighted_com += mass * com
-
-        if total_mass > 0.0:
-            com = weighted_com / total_mass
-        else:
-            com = np.mean(
-                [parts[gi].position * ldu_to_meters for gi in global_indices],
-                axis=0,
+    # Non-collinear revolute axis merging: if two units share revolute
+    # connections whose axes are not collinear (same line), the pair is
+    # over-constrained and the units must be merged into one rigid body.
+    # Two axes are collinear when they are parallel AND their pivot points
+    # lie on the same line.  Non-parallel axes or parallel axes at offset
+    # positions both prevent free rotation → rigid.
+    _PARALLEL_TOL = 0.95
+    _COLLINEAR_DIST_TOL = 2.0  # LDU tolerance for point-to-line distance
+    merged_any = True
+    while merged_any:
+        merged_any = False
+        # (shaft_dir, position, local_a, local_b) per unit pair
+        pair_entries: Dict[
+            Tuple[int, int],
+            List[Tuple[np.ndarray, np.ndarray, int, int]],
+        ] = {}
+        for li_a, li_b, conn_part in revolute_connections:
+            ui = local_to_unit[li_a]
+            uj = local_to_unit[li_b]
+            if ui == uj:
+                continue
+            pair = (min(ui, uj), max(ui, uj))
+            _, _, shaft = _connector_shaft(conn_part)
+            pos = conn_part.position.copy()
+            pair_entries.setdefault(pair, []).append(
+                (shaft, pos, li_a, li_b)
             )
 
-        unit_idx = len(units)
-        units.append(Unit(bricks=unit_bricks, mass=total_mass, center_of_mass=com))
-        for li in local_indices:
-            local_to_unit[li] = unit_idx
+        for _pair, entries in pair_entries.items():
+            if len(entries) < 2:
+                continue
+            ref_axis = entries[0][0]
+            ref_pos = entries[0][1]
+            for shaft, pos, _la, _lb in entries[1:]:
+                is_parallel = abs(float(np.dot(ref_axis, shaft))) >= _PARALLEL_TOL
+                if is_parallel:
+                    # Check collinearity: distance from pos to the ref axis line
+                    v = pos - ref_pos
+                    cross = np.cross(v, ref_axis)
+                    dist = float(np.linalg.norm(cross))
+                    if dist < _COLLINEAR_DIST_TOL:
+                        continue  # truly collinear — single revolute DOF
+                # Non-collinear (non-parallel or offset-parallel) → merge
+                uf.union(entries[0][2], entries[0][3])
+                merged_any = True
+                break
+
+        if merged_any:
+            units, local_to_unit = _units_from_uf(
+                uf, n_structural, structural_indices, parts, density,
+                ldu_to_meters,
+            )
 
     # Build revolute joints
     joints: List[Joint] = []
