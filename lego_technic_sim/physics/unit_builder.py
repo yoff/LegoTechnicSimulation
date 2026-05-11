@@ -296,7 +296,10 @@ def _find_port_connections(
     if ctype is None:
         return []
 
-    connections: List[Tuple[int, str]] = []
+    shaft_vec = ep_b - ep_a
+    shaft_len_sq = float(np.dot(shaft_vec, shaft_vec))
+
+    connections: List[Tuple[int, str, float]] = []  # (idx, type, t)
     for idx, sp in structural_parts:
         if not sp.ports:
             continue
@@ -306,10 +309,23 @@ def _find_port_connections(
             if _port_on_shaft(port, ep_a, ep_b, shaft_dir):
                 conn_type = _determine_connection_type(ctype, port.port_type, sp)
                 if conn_type != "none":
-                    connections.append((idx, conn_type))
+                    v = port.position - ep_a
+                    t = float(np.dot(v, shaft_vec)) / max(shaft_len_sq, 1e-12)
+                    connections.append((idx, conn_type, t))
                     break  # One port match per part is sufficient
 
-    return connections
+    # Capacity limit: a connector can physically engage at most
+    # shaft_length / 20 parts (standard Technic hole spacing is 20 LDU).
+    # When more parts match, drop endpoint matches — they represent
+    # coincidental proximity rather than true engagement (e.g. a 3L pin
+    # with bushings cannot reach a 4th part past its tip).
+    shaft_len = float(np.sqrt(shaft_len_sq))
+    max_conns = max(2, round(shaft_len / 20.0))
+    if len(connections) > max_conns:
+        connections.sort(key=lambda c: abs(c[2] - 0.5))
+        connections = connections[:max_conns]
+
+    return [(idx, ct) for idx, ct, _t in connections]
 
 
 def build_units_and_joints(
