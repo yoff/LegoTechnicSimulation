@@ -41,6 +41,7 @@ import numpy as np
 
 from ..physics.mesh_properties import LDU_TO_METERS
 from ..physics.model import Joint, JointType, Motor, PhysicsScene, Unit
+from ..physics.drive_train import build_drive_train
 
 
 def _ldraw_to_blender(v: np.ndarray) -> np.ndarray:
@@ -420,6 +421,119 @@ def generate_blender_script(
             emit()
 
     # ------------------------------------------------------------------
+    # Gear meshes — disable collisions and build kinematic coupling
+    # ------------------------------------------------------------------
+    # Build drive tree to determine which gear drives which
+    drive_tree = build_drive_train(scene)
+    # Map: driven_unit_index → (driver_unit_index, ratio, driver_axis_bl, driven_axis_bl, hinge_pos_bl)
+    gear_couplings: list[tuple[int, int, float, np.ndarray, np.ndarray, np.ndarray]] = []
+
+    if drive_tree and scene.gears:
+        # Build parent map from drive tree
+        parent_map: dict[int, int] = {}
+        for node in drive_tree.all_nodes:
+            for child in node.children:
+                parent_map[child.unit_index] = node.unit_index
+
+        # Build map: (unit_a, unit_b) → joint for finding hinge positions
+        joint_map: dict[tuple[int, int], Joint] = {}
+        for j in scene.joints:
+            joint_map[(j.unit_a_index, j.unit_b_index)] = j
+            joint_map[(j.unit_b_index, j.unit_a_index)] = j
+
+        for gc in scene.gears:
+            # Determine which unit is the driver (closer to motor)
+            if gc.unit_a_index in parent_map and parent_map[gc.unit_a_index] == gc.unit_b_index:
+                # B drives A
+                driver_idx, driven_idx = gc.unit_b_index, gc.unit_a_index
+                driver_axis = _ldraw_to_blender(gc.axis_b)
+                driven_axis = _ldraw_to_blender(gc.axis_a)
+                ratio = 1.0 / gc.ratio  # invert: A is driven
+            elif gc.unit_b_index in parent_map and parent_map[gc.unit_b_index] == gc.unit_a_index:
+                # A drives B
+                driver_idx, driven_idx = gc.unit_a_index, gc.unit_b_index
+                driver_axis = _ldraw_to_blender(gc.axis_a)
+                driven_axis = _ldraw_to_blender(gc.axis_b)
+                ratio = gc.ratio
+            else:
+                continue  # Not in drive tree — skip coupling
+
+            # Find the hinge joint for the driven gear (connects it to the frame)
+            hinge_pos = None
+            for j in scene.joints:
+                if j.joint_type == JointType.REVOLUTE:
+                    if driven_idx in (j.unit_a_index, j.unit_b_index):
+                        hinge_pos = _ldraw_to_blender(j.position)
+                        break
+            if hinge_pos is None:
+                # Fallback to gear mesh position
+                hinge_pos = _ldraw_to_blender(gc.position) * LDU_TO_METERS
+
+            # Normalise axes
+            dn = float(np.linalg.norm(driver_axis))
+            if dn > 1e-12:
+                driver_axis = driver_axis / dn
+            dn2 = float(np.linalg.norm(driven_axis))
+            if dn2 > 1e-12:
+                driven_axis = driven_axis / dn2
+
+            # For meshing spur gears the driven gear spins opposite
+            # (teeth push in reverse). Check if axes are parallel vs anti-parallel.
+            dot = float(np.dot(driver_axis, driven_axis))
+            if dot > 0:
+                # Same direction axes → counter-rotate
+                sign = -1.0
+            else:
+                # Anti-parallel axes → same rotation sign
+                sign = 1.0
+
+            gear_couplings.append(
+                (driver_idx, driven_idx, sign * ratio, driver_axis, driven_axis, hinge_pos)
+            )
+
+    if scene.gears:
+        emit("# ── Gear meshes (collision exclusion) ─────────────────────")
+        emit()
+        for gidx, gc in enumerate(scene.gears):
+            midpoint = _ldraw_to_blender(gc.position) * LDU_TO_METERS
+            emit(f"# Gear mesh {gidx}: unit {gc.unit_a_index} ↔ unit {gc.unit_b_index}"
+                 f" (ratio {gc.ratio:.3f})")
+            emit(
+                f"bpy.ops.object.empty_add("
+                f"location=({midpoint[0]:.6f}, {midpoint[1]:.6f}, {midpoint[2]:.6f}))"
+            )
+            emit("_gc = bpy.context.active_object")
+            emit(f"_gc.name = 'gear_mesh_{gidx}'")
+            emit(f"bpy.ops.rigidbody.constraint_add(type='FIXED')")
+            emit(f"_gc.rigid_body_constraint.object1 = _units[{gc.unit_a_index}]")
+            emit(f"_gc.rigid_body_constraint.object2 = _units[{gc.unit_b_index}]")
+            emit("_gc.rigid_body_constraint.disable_collisions = True")
+            emit("_gc.rigid_body_constraint.enabled = False")
+            emit()
+
+    if gear_couplings:
+        emit("# ── Kinematic gear coupling ────────────────────────────────")
+        emit("# Driven gears are set to kinematic; after the physics bake,")
+        emit("# their rotation is overwritten based on the driving gear's")
+        emit("# baked rotation scaled by the gear ratio.")
+        emit()
+        # Mark driven gears as kinematic
+        driven_indices = {c[1] for c in gear_couplings}
+        for di in driven_indices:
+            emit(f"_units[{di}].rigid_body.kinematic = True")
+        emit()
+
+        # Build the coupling data structure in the generated script
+        emit("_gear_couplings = [")
+        for driver_idx, driven_idx, ratio, driver_axis, driven_axis, hinge_pos in gear_couplings:
+            emit(f"    ({driver_idx}, {driven_idx}, {ratio:.6f},")
+            emit(f"     mathutils.Vector(({driver_axis[0]:.6f}, {driver_axis[1]:.6f}, {driver_axis[2]:.6f})),")
+            emit(f"     mathutils.Vector(({driven_axis[0]:.6f}, {driven_axis[1]:.6f}, {driven_axis[2]:.6f})),")
+            emit(f"     mathutils.Vector(({hinge_pos[0]:.6f}, {hinge_pos[1]:.6f}, {hinge_pos[2]:.6f}))),")
+        emit("]")
+        emit()
+
+    # ------------------------------------------------------------------
     # Bake and render
     # ------------------------------------------------------------------
     emit("# ── Finalise ─────────────────────────────────────────────────")
@@ -430,6 +544,26 @@ def generate_blender_script(
     emit("with bpy.context.temp_override(**override):")
     emit("    bpy.ops.ptcache.bake(bake=True)")
     emit("print('Physics bake complete.')")
+
+    if gear_couplings:
+        emit()
+        emit("# ── Keyframe driven gears from baked physics ────────────────")
+        emit("print('Applying gear couplings...')")
+        emit("for _f in range(scene.frame_start, scene.frame_end + 1):")
+        emit("    scene.frame_set(_f)")
+        emit("    for driver_idx, driven_idx, ratio, driver_axis, driven_axis, pivot in _gear_couplings:")
+        emit("        _drv = _units[driver_idx]")
+        emit("        _drvn = _units[driven_idx]")
+        emit("        # Read baked rotation of driving gear")
+        emit("        _drv_euler = _drv.matrix_world.to_euler('XYZ')")
+        emit("        _drv_rot = mathutils.Vector(_drv_euler).dot(driver_axis)")
+        emit("        # Compute driven rotation around hinge axis")
+        emit("        _driven_rot = _drv_rot * ratio")
+        emit("        _rot_mat = mathutils.Matrix.Rotation(_driven_rot, 4, driven_axis)")
+        emit("        _drvn.matrix_world = mathutils.Matrix.Translation(pivot) @ _rot_mat @ mathutils.Matrix.Translation(-pivot)")
+        emit("        _drvn.keyframe_insert(data_path='location', frame=_f)")
+        emit("        _drvn.keyframe_insert(data_path='rotation_euler', frame=_f)")
+        emit("print('Gear coupling complete.')")
 
     if render:
         emit()

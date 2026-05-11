@@ -37,6 +37,7 @@ class ConnectorType(Enum):
 # ──────────────────────────────────────────────────────────────────────────────
 
 FRICTION_PIN_IDS: FrozenSet[str] = frozenset({
+    "2780.dat",      # Technic Pin with Friction and Slots
     "4459.dat",      # Technic Pin with Friction Ridges
     "6558.dat",      # Technic Pin Long with Friction Ridges
     "32054.dat",     # Technic Pin Long with Stop Bush
