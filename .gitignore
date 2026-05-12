@@ -31,3 +31,7 @@ Thumbs.db
 
 sample_models/
 *.mp4
+
+# Generated Blender scripts (contain inline mesh data, very large)
+walker1_*.py
+motor_*_sim.py
