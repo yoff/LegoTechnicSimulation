@@ -233,11 +233,11 @@ class TestConnectorBasedJoints:
         assert classify_connector("6536.dat") is None
 
     def test_frictionless_3l_pin_through_joiner_creates_revolute(self):
-        """Frictionless 3L pin (42003.dat) connecting two sub-assemblies via
+        """Frictionless 3L pin (32556.dat) connecting two sub-assemblies via
         a 6536.dat joiner must produce a revolute joint, not merge them.
 
         Layout (along Z axis):
-          beam_a ←friction pin→ joiner(6536) ←frictionless pin(42003)→ beam_b
+          beam_a ←friction pin→ joiner(6536) ←frictionless pin(32556)→ beam_b
 
         Expected: beam_a + joiner form one rigid unit, beam_b forms another,
         with a revolute joint between them.
@@ -252,7 +252,7 @@ class TestConnectorBasedJoints:
         # Leg-side beam
         beam_b = _make_part("3002.dat", np.array([0.0, 0.0, 40.0]), size=10.0)
         # Frictionless 3L pin connecting joiner and beam_b (revolute)
-        free_pin = _make_connector("42003.dat", np.array([0.0, 0.0, 30.0]),
+        free_pin = _make_connector("32556.dat", np.array([0.0, 0.0, 30.0]),
                                    shaft_axis=2, length=20.0, cross=6.0)
 
         build = LDrawBuild(

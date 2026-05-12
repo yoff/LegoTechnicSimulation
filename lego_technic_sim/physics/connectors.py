@@ -54,7 +54,6 @@ FRICTIONLESS_PIN_IDS: FrozenSet[str] = frozenset({
     "32002.dat",     # Technic Pin 3/4
     "4274.dat",      # Technic Pin 1/2 without Friction Ridges
     "11214.dat",     # Technic Pin Long without Friction (3L)
-    "42003.dat",     # Cross Block with 2 Pins (treated as frictionless connector)
     "32556.dat",     # Technic Pin Long without Friction with Single Slot (3L)
 })
 
