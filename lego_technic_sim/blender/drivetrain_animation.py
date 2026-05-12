@@ -200,18 +200,35 @@ def generate_drivetrain_animation(
         emit(f"_obj.keyframe_insert(data_path='hide_render', frame={appear_frame})")
         emit()
 
-        # Rotation keyframes: spin around gear axis at rate proportional to ratio
-        # Angular speed: root spins at base_speed, children at base_speed * ratio
-        com_bl = _ldraw_to_blender(unit.center_of_mass)
-        axis_bl = _ldraw_axis_to_blender(node.axis)
+        # Rotation keyframes: spin around hinge joint axis at rate proportional
+        # to ratio.  The pivot and axis come from the revolute joint that
+        # connects this gear unit to its parent/frame — NOT from the gear mesh
+        # axis, which can differ for bevel gears.
+        from ..physics.model import JointType
+
+        hinge_joint = None
+        for j in scene.joints:
+            if j.joint_type != JointType.REVOLUTE:
+                continue
+            if node.unit_index in (j.unit_a_index, j.unit_b_index):
+                hinge_joint = j
+                break
+
+        if hinge_joint is not None:
+            pivot_bl = _ldraw_to_blender(hinge_joint.position)
+            axis_bl = _ldraw_axis_to_blender(hinge_joint.axis)
+        else:
+            # Fallback: use COM and gear mesh axis
+            pivot_bl = _ldraw_to_blender(unit.center_of_mass)
+            axis_bl = _ldraw_axis_to_blender(node.axis)
         norm = float(np.linalg.norm(axis_bl))
         if norm > 1e-12:
             axis_bl = axis_bl / norm
 
         # Set origin to center of mass for rotation
         emit(f"_obj.location = (0, 0, 0)")
-        emit(f"# Rotation pivot at center of mass")
-        emit(f"_pivot = mathutils.Vector(({com_bl[0]:.6f}, {com_bl[1]:.6f}, {com_bl[2]:.6f}))")
+        emit(f"# Rotation pivot at hinge joint")
+        emit(f"_pivot = mathutils.Vector(({pivot_bl[0]:.6f}, {pivot_bl[1]:.6f}, {pivot_bl[2]:.6f}))")
         emit(f"_axis = mathutils.Vector(({axis_bl[0]:.6f}, {axis_bl[1]:.6f}, {axis_bl[2]:.6f}))")
         emit()
 

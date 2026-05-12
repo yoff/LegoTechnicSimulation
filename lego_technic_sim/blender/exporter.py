@@ -446,28 +446,40 @@ def generate_blender_script(
             if gc.unit_a_index in parent_map and parent_map[gc.unit_a_index] == gc.unit_b_index:
                 # B drives A
                 driver_idx, driven_idx = gc.unit_b_index, gc.unit_a_index
-                driver_axis = _ldraw_to_blender(gc.axis_b)
-                driven_axis = _ldraw_to_blender(gc.axis_a)
                 ratio = 1.0 / gc.ratio  # invert: A is driven
             elif gc.unit_b_index in parent_map and parent_map[gc.unit_b_index] == gc.unit_a_index:
                 # A drives B
                 driver_idx, driven_idx = gc.unit_a_index, gc.unit_b_index
-                driver_axis = _ldraw_to_blender(gc.axis_a)
-                driven_axis = _ldraw_to_blender(gc.axis_b)
                 ratio = gc.ratio
             else:
                 continue  # Not in drive tree — skip coupling
 
-            # Find the hinge joint for the driven gear (connects it to the frame)
-            hinge_pos = None
+            # Find the hinge joints for driver and driven gears.
+            # The rotation axis is the joint hinge axis (the pin/axle the
+            # gear rotates around), NOT the gear-mesh tooth axis.
+            driver_hinge = None
+            driven_hinge = None
             for j in scene.joints:
-                if j.joint_type == JointType.REVOLUTE:
-                    if driven_idx in (j.unit_a_index, j.unit_b_index):
-                        hinge_pos = _ldraw_to_blender(j.position)
-                        break
-            if hinge_pos is None:
-                # Fallback to gear mesh position
+                if j.joint_type != JointType.REVOLUTE:
+                    continue
+                if driver_idx in (j.unit_a_index, j.unit_b_index):
+                    if driver_hinge is None:
+                        driver_hinge = j
+                if driven_idx in (j.unit_a_index, j.unit_b_index):
+                    if driven_hinge is None:
+                        driven_hinge = j
+
+            if driven_hinge is not None:
+                hinge_pos = _ldraw_to_blender(driven_hinge.position)
+                driven_axis = _ldraw_to_blender(driven_hinge.axis)
+            else:
                 hinge_pos = _ldraw_to_blender(gc.position) * LDU_TO_METERS
+                driven_axis = _ldraw_to_blender(gc.axis_b if driven_idx == gc.unit_b_index else gc.axis_a)
+
+            if driver_hinge is not None:
+                driver_axis = _ldraw_to_blender(driver_hinge.axis)
+            else:
+                driver_axis = _ldraw_to_blender(gc.axis_a if driver_idx == gc.unit_a_index else gc.axis_b)
 
             # Normalise axes
             dn = float(np.linalg.norm(driver_axis))
@@ -478,13 +490,22 @@ def generate_blender_script(
                 driven_axis = driven_axis / dn2
 
             # For meshing spur gears the driven gear spins opposite
-            # (teeth push in reverse). Check if axes are parallel vs anti-parallel.
-            dot = float(np.dot(driver_axis, driven_axis))
+            # (teeth push in reverse).  For bevel gears with perpendicular
+            # axes we need to check the gear-mesh axes to determine sign.
+            gear_axis_a = gc.axis_a if driver_idx == gc.unit_a_index else gc.axis_b
+            gear_axis_b = gc.axis_b if driven_idx == gc.unit_b_index else gc.axis_a
+            ga_bl = _ldraw_to_blender(gear_axis_a)
+            gb_bl = _ldraw_to_blender(gear_axis_b)
+            ga_n = float(np.linalg.norm(ga_bl))
+            gb_n = float(np.linalg.norm(gb_bl))
+            if ga_n > 1e-12:
+                ga_bl = ga_bl / ga_n
+            if gb_n > 1e-12:
+                gb_bl = gb_bl / gb_n
+            dot = float(np.dot(ga_bl, gb_bl))
             if dot > 0:
-                # Same direction axes → counter-rotate
                 sign = -1.0
             else:
-                # Anti-parallel axes → same rotation sign
                 sign = 1.0
 
             gear_couplings.append(
@@ -548,6 +569,11 @@ def generate_blender_script(
     if gear_couplings:
         emit()
         emit("# ── Keyframe driven gears from baked physics ────────────────")
+        emit("# Store initial transforms for driven gears (frame 1)")
+        emit("scene.frame_set(scene.frame_start)")
+        emit("_driven_initial = {}")
+        emit("for _, driven_idx, *_ in _gear_couplings:")
+        emit("    _driven_initial[driven_idx] = _units[driven_idx].matrix_world.copy()")
         emit("print('Applying gear couplings...')")
         emit("for _f in range(scene.frame_start, scene.frame_end + 1):")
         emit("    scene.frame_set(_f)")
@@ -560,7 +586,13 @@ def generate_blender_script(
         emit("        # Compute driven rotation around hinge axis")
         emit("        _driven_rot = _drv_rot * ratio")
         emit("        _rot_mat = mathutils.Matrix.Rotation(_driven_rot, 4, driven_axis)")
-        emit("        _drvn.matrix_world = mathutils.Matrix.Translation(pivot) @ _rot_mat @ mathutils.Matrix.Translation(-pivot)")
+        emit("        _init = _driven_initial[driven_idx]")
+        emit("        _drvn.matrix_world = (")
+        emit("            mathutils.Matrix.Translation(pivot)")
+        emit("            @ _rot_mat")
+        emit("            @ mathutils.Matrix.Translation(-pivot)")
+        emit("            @ _init")
+        emit("        )")
         emit("        _drvn.keyframe_insert(data_path='location', frame=_f)")
         emit("        _drvn.keyframe_insert(data_path='rotation_euler', frame=_f)")
         emit("print('Gear coupling complete.')")
