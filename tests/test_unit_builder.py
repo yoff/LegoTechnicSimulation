@@ -514,3 +514,44 @@ def test_collinear_revolute_axes_stay_separate():
         f"Expected 2 units (collinear pins allow rotation), got {len(scene.units)}"
     )
     assert any(j.joint_type == JointType.REVOLUTE for j in scene.joints)
+
+
+# ---------------------------------------------------------------------------
+# Consistency checks
+# ---------------------------------------------------------------------------
+
+
+def test_missing_geometry_warns():
+    """A structural part with no triangles triggers a warning."""
+    # Part with empty triangles list
+    part = LDrawPart("ghost.dat", 4, np.eye(4), [])
+    build = LDrawBuild(name="empty_geom", parts=[part])
+    with pytest.warns(UserWarning, match="no geometry"):
+        build_units_and_joints(build)
+
+
+def test_all_structural_parts_assigned_to_units():
+    """Every structural part must end up in exactly one unit."""
+    from tests.test_mesh_properties import make_cube_triangles
+
+    tris = make_cube_triangles()
+    parts = [
+        LDrawPart("beam.dat", 4, np.eye(4), list(tris)),
+        LDrawPart("beam.dat", 4, np.eye(4), list(tris)),
+    ]
+    # Place them far apart so they're separate units
+    parts[1].transform[:3, 3] = [200, 0, 0]
+    for t in parts[1].triangles:
+        t.v0 = t.v0 + np.array([200, 0, 0])
+        t.v1 = t.v1 + np.array([200, 0, 0])
+        t.v2 = t.v2 + np.array([200, 0, 0])
+
+    build = LDrawBuild(name="two_beams", parts=parts)
+    scene = build_units_and_joints(build)
+
+    # Both should be assigned
+    all_bricks = []
+    for unit in scene.units:
+        all_bricks.extend(unit.bricks)
+    assert len(all_bricks) == 2
+    assert set(id(b) for b in all_bricks) == set(id(p) for p in parts)

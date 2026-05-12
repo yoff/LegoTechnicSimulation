@@ -389,6 +389,34 @@ def build_units_and_joints(
 
     scene.motors = detect_motors(scene)
     scene.gears = detect_gear_meshes(scene)
+
+    # ── Consistency checks ────────────────────────────────────────────────
+    # 1. Every structural brick must have geometry (triangles).
+    for i in structural_indices:
+        p = parts[i]
+        if not p.triangles:
+            import warnings
+            warnings.warn(
+                f"Part {p.part_id} at index {i} has no geometry (0 triangles). "
+                f"It may be missing from the LDraw library.",
+                stacklevel=2,
+            )
+
+    # 2. Every structural brick must belong to exactly one unit.
+    assigned_parts = set()
+    for unit in scene.units:
+        for brick in unit.bricks:
+            assigned_parts.add(id(brick))
+    for i in structural_indices:
+        p = parts[i]
+        if id(p) not in assigned_parts:
+            import warnings
+            warnings.warn(
+                f"Part {p.part_id} at index {i} is structural but not "
+                f"assigned to any unit.",
+                stacklevel=2,
+            )
+
     return scene
 
 
