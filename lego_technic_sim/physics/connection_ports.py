@@ -137,15 +137,13 @@ _STUD_PRIMITIVES: FrozenSet[str] = frozenset({
     "stud.dat",
     "stud2.dat",
     "stud2a.dat",
+})
+
+# Primitives indicating an anti-stud (underside receptacle / hollow tube).
+_ANTI_STUD_PRIMITIVES: FrozenSet[str] = frozenset({
     "stud3.dat",
     "stud3a.dat",
     "stud4.dat",
-    "stud4a.dat",
-})
-
-# Primitives indicating an anti-stud (underside receptacle).
-_ANTI_STUD_PRIMITIVES: FrozenSet[str] = frozenset({
-    "stud3a.dat",  # hollow stud used as anti-stud in many contexts
     "stud4a.dat",
 })
 
@@ -155,13 +153,10 @@ for _p in _ROUND_HOLE_PRIMITIVES:
     _PRIMITIVE_PORT_MAP[_p] = PortType.ROUND_HOLE
 for _p in _AXLE_HOLE_PRIMITIVES:
     _PRIMITIVE_PORT_MAP[_p] = PortType.AXLE_HOLE
-# Note: studs could be both STUD and ANTI_STUD depending on context;
-# we classify hollow studs (stud3a, stud4a) as anti-studs below the
-# brick, and solid studs as top studs.  For simplicity we detect both
-# from the same primitives and disambiguate by Y position relative to
-# the part origin.
 for _p in _STUD_PRIMITIVES:
     _PRIMITIVE_PORT_MAP[_p] = PortType.STUD
+for _p in _ANTI_STUD_PRIMITIVES:
+    _PRIMITIVE_PORT_MAP[_p] = PortType.ANTI_STUD
 
 
 # ---------------------------------------------------------------------------

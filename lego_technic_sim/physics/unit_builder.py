@@ -577,6 +577,48 @@ def _build_via_connectors(
                 touched_by_connector.add(li)
                 touched_by_connector.add(other_li)
 
+    # Stud/anti-stud merging: when a STUD from one part is close to an
+    # ANTI_STUD on another part (brick stacking), merge them.  Anti-stud
+    # tubes sit *between* studs, so we decompose the distance into an
+    # axial component (along the stud axis) and a lateral component
+    # (perpendicular) and use separate tolerances.
+    _STUD_AXIAL_TOL = 10.0   # LDU along stud axis
+    _STUD_LATERAL_TOL = 14.0  # LDU perpendicular to stud axis
+    for li in range(n_structural):
+        sp = parts[structural_indices[li]]
+        studs_a = [p for p in sp.ports if p.port_type == PortType.STUD]
+        anti_a = [p for p in sp.ports if p.port_type == PortType.ANTI_STUD]
+        if not studs_a and not anti_a:
+            continue
+        for other_li in range(li + 1, n_structural):
+            if uf.find(li) == uf.find(other_li):
+                continue
+            other_sp = parts[structural_indices[other_li]]
+            studs_b = [p for p in other_sp.ports if p.port_type == PortType.STUD]
+            anti_b = [p for p in other_sp.ports
+                       if p.port_type == PortType.ANTI_STUD]
+            # Check both directions: A.stud↔B.anti and A.anti↔B.stud
+            pairs = []
+            if studs_a and anti_b:
+                pairs.extend((s, a) for s in studs_a for a in anti_b)
+            if anti_a and studs_b:
+                pairs.extend((s, a) for s in studs_b for a in anti_a)
+            matched = False
+            for stud, astud in pairs:
+                if np.dot(stud.orientation, astud.orientation) > -0.5:
+                    continue
+                diff = astud.position - stud.position
+                axial = abs(float(np.dot(diff, stud.orientation)))
+                lateral = float(np.linalg.norm(
+                    diff - np.dot(diff, stud.orientation) * stud.orientation))
+                if axial < _STUD_AXIAL_TOL and lateral < _STUD_LATERAL_TOL:
+                    matched = True
+                    break
+            if matched:
+                uf.union(li, other_li)
+                touched_by_connector.add(li)
+                touched_by_connector.add(other_li)
+
     # Fallback for parts with no ports and no connector touching them:
     # merge with nearest structural part via vertex proximity.
     _SNAP_DIST_LDU = 8.0
