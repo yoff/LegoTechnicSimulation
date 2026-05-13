@@ -219,18 +219,30 @@ def _port_on_shaft(
     pos_tol: float = PORT_POSITION_TOLERANCE,
     ori_tol: float = PORT_ORIENTATION_TOLERANCE,
 ) -> bool:
-    """Check if a port's position lies on the shaft line and its orientation aligns."""
+    """Check if a port's position lies on the shaft line and its orientation aligns.
+
+    The port must be within *pos_tol* of the infinite shaft line
+    (lateral distance) **and** within the shaft segment extended by a
+    small axial margin to account for insertion depth (pins/axles insert
+    into beam holes beyond the connector mesh boundary).
+    """
     shaft_vec = ep_b - ep_a
     shaft_len_sq = float(np.dot(shaft_vec, shaft_vec))
 
-    # Distance from port position to shaft line segment
     v = port.position - ep_a
     if shaft_len_sq < 1e-12:
         dist = float(np.linalg.norm(v))
     else:
         t = float(np.dot(v, shaft_vec)) / shaft_len_sq
-        t = max(0.0, min(1.0, t))
-        closest = ep_a + t * shaft_vec
+        # Allow extending up to _AXIAL_MARGIN beyond each endpoint
+        # to account for pin insertion depth into beam holes (the
+        # connector mesh often doesn't extend to the actual engagement
+        # point, typically ~1-2 LDU short).
+        _AXIAL_MARGIN_LDU = 4.0
+        shaft_len = shaft_len_sq ** 0.5
+        margin_t = _AXIAL_MARGIN_LDU / shaft_len if shaft_len > 1e-6 else 0.0
+        t_clamped = max(-margin_t, min(1.0 + margin_t, t))
+        closest = ep_a + t_clamped * shaft_vec
         dist = float(np.linalg.norm(port.position - closest))
 
     if dist > pos_tol:
@@ -272,13 +284,19 @@ def _determine_connection_type(
         else:
             return "rigid"  # Default: treat as rigid
     elif connector_type == ConnectorType.AXLE_PIN:
-        # Axle pin: pin end is frictionless (round), axle end grips cross holes
+        # Axle pin: axle end grips cross holes rigidly, pin end has friction
+        # ridges and is rigid in round holes.  Exception: axle holes on motor
+        # parts are always revolute (driven output shafts).
         if port_type == PortType.AXLE_HOLE:
+            if structural_part is not None:
+                from .motor_detection import is_motor_part
+                if is_motor_part(structural_part.part_id):
+                    return "revolute"
             return "rigid"  # Cross hole grips the axle end
         elif port_type == PortType.ROUND_HOLE:
-            return "revolute"  # Round hole lets pin end spin
+            return "rigid"  # Pin end has friction ridges
         else:
-            return "revolute"  # Default: treat as revolute
+            return "rigid"  # Default: treat as rigid
     return "none"
 
 

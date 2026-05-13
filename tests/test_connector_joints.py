@@ -170,8 +170,8 @@ class TestConnectorBasedJoints:
         assert len(scene.units) == 1
         assert len(scene.joints) == 0
 
-    def test_axle_pin_creates_revolute_joint(self):
-        """Two beams joined by an axle pin → revolute joint."""
+    def test_axle_pin_creates_rigid_merge(self):
+        """Two beams joined by an axle pin → rigid merge (friction ridges)."""
         beam_a = _make_part("3001.dat", np.array([0.0, 0.0, 0.0]), size=10.0)
         beam_b = _make_part("3002.dat", np.array([0.0, 0.0, 20.0]), size=10.0)
         axle_pin = _make_connector("3749.dat", np.array([0.0, 0.0, 10.0]),
@@ -180,13 +180,28 @@ class TestConnectorBasedJoints:
         build = LDrawBuild(name="test", parts=[beam_a, beam_b, axle_pin])
         scene = build_units_and_joints(build)
 
-        assert len(scene.units) == 2
-        assert len(scene.joints) == 1
-        assert scene.joints[0].joint_type == JointType.REVOLUTE
+        assert len(scene.units) == 1
+        assert len(scene.joints) == 0
 
     def test_motor_with_axle_creates_driven_joint(self):
-        """Motor connected to a beam via axle → revolute joint + motor."""
+        """Motor connected to a beam via axle pin → revolute joint + motor.
+
+        The motor must have an AXLE_HOLE port (output shaft) for the axle
+        pin's axle end to create a revolute joint.
+        """
         motor = _make_part("58121.dat", np.array([0.0, 0.0, 0.0]), size=10.0)
+        # Replace round hole with axle hole to represent motor output shaft
+        motor = LDrawPart(
+            part_id=motor.part_id,
+            color=motor.color,
+            transform=motor.transform,
+            triangles=motor.triangles,
+            ports=[ConnectionPort(
+                port_type=PortType.AXLE_HOLE,
+                position=np.array([0.0, 0.0, 0.0]),
+                orientation=np.array([0.0, 0.0, 1.0]),
+            )],
+        )
         beam = _make_part("3001.dat", np.array([0.0, 0.0, 20.0]), size=10.0)
         axle = _make_connector("3749.dat", np.array([0.0, 0.0, 10.0]),
                                shaft_axis=2, length=20.0, cross=6.0)
