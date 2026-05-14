@@ -253,20 +253,41 @@ def _port_on_shaft(
     return cos_angle >= ori_tol
 
 
+def _is_motor_output_axis(motor: LDrawPart, port: ConnectionPort) -> bool:
+    """True when *port* is aligned with the motor's output shaft axis.
+
+    The output axis is defined by the orientation of the motor's AXLE_HOLE
+    ports.  ROUND_HOLEs along the same axis are internal bearings that allow
+    free rotation, as opposed to perpendicular mounting holes.
+    """
+    for p in motor.ports:
+        if p.port_type == PortType.AXLE_HOLE:
+            cos = abs(float(np.dot(port.orientation, p.orientation)))
+            return cos > 0.9
+    return False
+
+
 def _determine_connection_type(
     connector_type: ConnectorType,
     port_type: PortType,
     structural_part: Optional[LDrawPart] = None,
+    port: Optional[ConnectionPort] = None,
 ) -> str:
     """Determine if a connector-port pair creates a 'rigid' or 'revolute' bond.
 
     Returns 'rigid', 'revolute', or 'none'.
     """
-    # Motor output shafts: axle holes on motors create revolute (driven) joints
+    # Motor output shafts: axle holes and output-axis round holes on motors
+    # create revolute (driven) joints.  Round holes along the output axis
+    # are internal bearings — connectors through them can spin freely.
     if structural_part is not None:
         from .motor_detection import is_motor_part
         if is_motor_part(structural_part.part_id):
             if port_type == PortType.AXLE_HOLE:
+                return "revolute"
+            if (port_type == PortType.ROUND_HOLE
+                    and port is not None
+                    and _is_motor_output_axis(structural_part, port)):
                 return "revolute"
 
     if connector_type == ConnectorType.FRICTION_PIN:
@@ -325,7 +346,7 @@ def _find_port_connections(
             if port.port_type == PortType.STUD:
                 continue  # Studs handled separately
             if _port_on_shaft(port, ep_a, ep_b, shaft_dir):
-                conn_type = _determine_connection_type(ctype, port.port_type, sp)
+                conn_type = _determine_connection_type(ctype, port.port_type, sp, port)
                 if conn_type != "none":
                     v = port.position - ep_a
                     t = float(np.dot(v, shaft_vec)) / max(shaft_len_sq, 1e-12)

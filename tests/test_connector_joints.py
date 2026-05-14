@@ -215,6 +215,52 @@ class TestConnectorBasedJoints:
         assert len(scene.motors) == 1
         assert scene.motors[0].joint_index == 0
 
+    def test_motor_round_hole_output_axis_creates_revolute(self):
+        """Axle-pin through a motor's output-axis ROUND_HOLE → revolute.
+
+        The motor's ROUND_HOLEs along its output shaft axis are internal
+        bearings.  A connector through one of them should create a revolute
+        joint, separating the attached gear from the motor body.
+        """
+        motor = _make_part("58121.dat", np.array([0.0, 0.0, 0.0]), size=10.0)
+        motor = LDrawPart(
+            part_id=motor.part_id,
+            color=motor.color,
+            transform=motor.transform,
+            triangles=motor.triangles,
+            ports=[
+                # Output shaft AXLE_HOLE (defines the output axis)
+                ConnectionPort(
+                    port_type=PortType.AXLE_HOLE,
+                    position=np.array([0.0, 0.0, 0.0]),
+                    orientation=np.array([0.0, 0.0, 1.0]),
+                ),
+                # Output-axis ROUND_HOLE (bearing)
+                ConnectionPort(
+                    port_type=PortType.ROUND_HOLE,
+                    position=np.array([0.0, 0.0, 40.0]),
+                    orientation=np.array([0.0, 0.0, 1.0]),
+                ),
+                # Perpendicular mounting ROUND_HOLE (should stay rigid)
+                ConnectionPort(
+                    port_type=PortType.ROUND_HOLE,
+                    position=np.array([0.0, 50.0, 0.0]),
+                    orientation=np.array([0.0, 1.0, 0.0]),
+                ),
+            ],
+        )
+        gear = _make_part("3648b.dat", np.array([0.0, 0.0, 60.0]), size=10.0)
+        axle_pin = _make_connector("3749.dat", np.array([0.0, 0.0, 50.0]),
+                                   shaft_axis=2, length=20.0, cross=6.0)
+
+        build = LDrawBuild(name="test", parts=[motor, gear, axle_pin])
+        scene = build_units_and_joints(build)
+
+        # Gear should be separate from motor (2 units)
+        assert len(scene.units) == 2, f"Expected 2 units, got {len(scene.units)}"
+        assert len(scene.joints) == 1
+        assert scene.joints[0].joint_type == JointType.REVOLUTE
+
     def test_no_connectors_falls_back_to_distance(self):
         """Build with no connector parts uses distance-based fallback."""
         # Two touching cubes (no connectors)
