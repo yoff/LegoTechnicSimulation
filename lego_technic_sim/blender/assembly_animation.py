@@ -12,17 +12,63 @@ relative to the blend file, or ``/tmp/assembly_`` in background mode).
 from __future__ import annotations
 
 from pathlib import Path
-from typing import List, Optional
+from typing import Dict, List, Optional, Set
 
 import numpy as np
 
+from ..ldraw.model import LDrawBuild, LDrawPart
+from ..physics.connectors import is_connector
 from ..physics.mesh_properties import LDU_TO_METERS
 from ..physics.model import PhysicsScene, Unit
+from ..physics.unit_builder import _connector_shaft, _find_port_connections
 
 
 def _ldraw_to_blender(v: np.ndarray) -> np.ndarray:
     """Convert a 3-D point from LDraw space to Blender space."""
     return np.array([v[0], -v[2], -v[1]], dtype=float)
+
+
+def _map_connectors_to_units(
+    build: LDrawBuild,
+    scene: PhysicsScene,
+) -> Dict[int, int]:
+    """Map each connector part index to the unit it should be displayed with.
+
+    A connector is assigned to the first rigid-connected unit it touches.
+    If all connections are revolute, it is assigned to the first connected
+    unit.  Returns a dict mapping connector part index → unit index.
+    """
+    # Build part identity → unit index lookup
+    brick_to_unit: Dict[int, int] = {}
+    for uid, unit in enumerate(scene.units):
+        for brick in unit.bricks:
+            brick_to_unit[id(brick)] = uid
+
+    connector_indices = [i for i, p in enumerate(build.parts) if is_connector(p.part_id)]
+    structural_tuples = [
+        (i, build.parts[i]) for i in range(len(build.parts))
+        if not is_connector(build.parts[i].part_id)
+    ]
+
+    result: Dict[int, int] = {}
+    for ci in connector_indices:
+        conn_part = build.parts[ci]
+        connections = _find_port_connections(conn_part, structural_tuples)
+        if not connections:
+            continue
+
+        # Prefer a rigid connection's unit
+        rigid_gi = [gi for gi, ct in connections if ct == "rigid"]
+        revolute_gi = [gi for gi, ct in connections if ct == "revolute"]
+
+        target_gi = rigid_gi[0] if rigid_gi else (revolute_gi[0] if revolute_gi else None)
+        if target_gi is not None:
+            part = build.parts[target_gi]
+            uid = brick_to_unit.get(id(part))
+            if uid is not None:
+                result[ci] = uid
+
+    return result
 
 
 def generate_assembly_animation(
@@ -35,6 +81,7 @@ def generate_assembly_animation(
     resolution_y: int = 720,
     render_format: str = "FFMPEG",
     cycles_samples: int = 32,
+    build: Optional[LDrawBuild] = None,
 ) -> str:
     """Generate a Blender script that renders units appearing in sequence.
 
@@ -48,6 +95,10 @@ def generate_assembly_animation(
         resolution_y:    Render height in pixels.
         render_format:   Blender output format ('FFMPEG', 'PNG', 'JPEG').
         cycles_samples:  Number of Cycles render samples (lower = faster).
+        build:           The original LDraw build.  When provided, connector
+                         geometry (pins, axles) is included in the
+                         visualisation and each unit (except 0) gets a solo
+                         frame before appearing in the full assembly.
 
     Returns:
         The generated Python script as a string.
@@ -57,7 +108,23 @@ def generate_assembly_animation(
     def emit(text: str = "") -> None:
         lines.append(text)
 
-    total_frames = len(scene.units) * frames_per_unit + hold_frames
+    # Map connectors to their display unit (if build is provided)
+    connector_to_unit: Dict[int, int] = {}
+    unit_connectors: Dict[int, List[LDrawPart]] = {}
+    show_solo = False
+    if build is not None:
+        connector_to_unit = _map_connectors_to_units(build, scene)
+        for ci, uid in connector_to_unit.items():
+            unit_connectors.setdefault(uid, []).append(build.parts[ci])
+        show_solo = True
+
+    # With solo frames: unit 0 gets 1 frame (assembly only), every other
+    # unit gets 2 frames (solo then assembly).
+    if show_solo:
+        total_unit_frames = (1 + (len(scene.units) - 1) * 2) * frames_per_unit
+    else:
+        total_unit_frames = len(scene.units) * frames_per_unit
+    total_frames = total_unit_frames + hold_frames
 
     # Compute scene bounds for camera placement
     all_positions = []
@@ -154,6 +221,7 @@ def generate_assembly_animation(
     # ------------------------------------------------------------------
     emit("# ── Units (appearing in sequence) ───────────────────────────")
     emit("_units = []")
+    emit("_solo_objs = []  # solo-frame duplicates (visible for 1 frame only)")
     emit()
 
     # Assign colours to units for visual distinction
@@ -161,17 +229,12 @@ def generate_assembly_animation(
     emit(f"_n_units = {len(scene.units)}")
     emit()
 
-    for idx, unit in enumerate(scene.units):
-        com_bl = _ldraw_to_blender(unit.center_of_mass)
-        safe_name = unit.name.replace('"', "")
-        appear_frame = idx * frames_per_unit + 1
-
-        # Collect all triangles from all bricks in this unit,
-        # converting from LDraw LDU to Blender metres.
+    def _collect_triangles(bricks: List[LDrawPart]):
+        """Return (vertices, faces) lists for a set of bricks."""
         vertices: List[List[float]] = []
         faces: List[List[int]] = []
         vi = 0
-        for brick in unit.bricks:
+        for brick in bricks:
             for tri in brick.triangles:
                 v0 = _ldraw_to_blender(tri.v0) * LDU_TO_METERS
                 v1 = _ldraw_to_blender(tri.v1) * LDU_TO_METERS
@@ -181,6 +244,33 @@ def generate_assembly_animation(
                 vertices.append([round(float(v2[0]), 7), round(float(v2[1]), 7), round(float(v2[2]), 7)])
                 faces.append([vi, vi + 1, vi + 2])
                 vi += 3
+        return vertices, faces
+
+    # Compute appear frame for each unit.  Unit 0 has no solo frame;
+    # every other unit gets a solo frame then an assembly frame.
+    appear_frames: List[int] = []  # frame where unit appears in assembly
+    solo_frames: List[Optional[int]] = []  # frame for solo view (None for unit 0)
+    frame_cursor = 1
+    for idx in range(len(scene.units)):
+        if idx == 0 or not show_solo:
+            solo_frames.append(None)
+            appear_frames.append(frame_cursor)
+            frame_cursor += frames_per_unit
+        else:
+            solo_frames.append(frame_cursor)
+            frame_cursor += frames_per_unit
+            appear_frames.append(frame_cursor)
+            frame_cursor += frames_per_unit
+
+    for idx, unit in enumerate(scene.units):
+        com_bl = _ldraw_to_blender(unit.center_of_mass)
+        safe_name = unit.name.replace('"', "")
+        appear_frame = appear_frames[idx]
+        solo_frame = solo_frames[idx]
+
+        # All bricks in this unit plus its connectors
+        all_bricks = list(unit.bricks) + unit_connectors.get(idx, [])
+        vertices, faces = _collect_triangles(all_bricks)
 
         emit(f"# Unit {idx}: {safe_name} (appears at frame {appear_frame})")
 
@@ -230,11 +320,75 @@ def generate_assembly_animation(
         emit("_units.append(_obj)")
         emit()
 
+        # Solo frame: show this unit alone for one frame before it joins
+        if solo_frame is not None and vertices:
+            emit(f"# Solo preview of unit {idx} at frame {solo_frame}")
+            solo_name = f"solo_{idx}"
+            emit(f"_solo_mesh = bpy.data.meshes.new({solo_name + '_mesh'!r})")
+            emit("_solo_mesh.from_pydata(_verts, [], _faces)")
+            emit("_solo_mesh.update()")
+            emit(f"_solo_obj = bpy.data.objects.new({solo_name!r}, _solo_mesh)")
+            emit("bpy.context.collection.objects.link(_solo_obj)")
+            # Use a brighter version of the same colour
+            emit(f"_smat = bpy.data.materials.new(name='solo_mat_{idx}')")
+            emit("_smat.use_nodes = True")
+            emit("_sbsdf = _smat.node_tree.nodes.get('Principled BSDF')")
+            emit("_sr, _sg, _sb = colorsys.hsv_to_rgb(_hue, 0.9, 1.0)")
+            emit("if _sbsdf:")
+            emit("    _sbsdf.inputs['Base Color'].default_value = (_sr, _sg, _sb, 1.0)")
+            emit("_solo_obj.data.materials.append(_smat)")
+            # Visible only on the solo frame
+            emit("_solo_obj.hide_viewport = True")
+            emit("_solo_obj.hide_render = True")
+            emit("_solo_obj.keyframe_insert(data_path='hide_viewport', frame=1)")
+            emit("_solo_obj.keyframe_insert(data_path='hide_render', frame=1)")
+            if solo_frame > 1:
+                emit(f"_solo_obj.keyframe_insert(data_path='hide_viewport', frame={solo_frame - 1})")
+                emit(f"_solo_obj.keyframe_insert(data_path='hide_render', frame={solo_frame - 1})")
+            emit("_solo_obj.hide_viewport = False")
+            emit("_solo_obj.hide_render = False")
+            emit(f"_solo_obj.keyframe_insert(data_path='hide_viewport', frame={solo_frame})")
+            emit(f"_solo_obj.keyframe_insert(data_path='hide_render', frame={solo_frame})")
+            # Hide again after the solo frame
+            emit("_solo_obj.hide_viewport = True")
+            emit("_solo_obj.hide_render = True")
+            emit(f"_solo_obj.keyframe_insert(data_path='hide_viewport', frame={solo_frame + 1})")
+            emit(f"_solo_obj.keyframe_insert(data_path='hide_render', frame={solo_frame + 1})")
+            emit("_solo_objs.append(_solo_obj)")
+            emit()
+
+    # ------------------------------------------------------------------
+    # Hide assembly units during solo frames
+    # ------------------------------------------------------------------
+    if show_solo:
+        emit("# ── Hide assembly objects on solo frames ──────────────────")
+        emit("# On each solo frame, all previously-visible assembly units")
+        emit("# must be temporarily hidden so only the solo object is seen.")
+        for idx in range(len(scene.units)):
+            sf = solo_frames[idx]
+            af = appear_frames[idx]
+            if sf is None:
+                continue
+            # On the solo frame, hide every assembly unit that appeared before
+            for prev in range(idx):
+                prev_af = appear_frames[prev]
+                if prev_af <= sf:
+                    emit(f"_units[{prev}].hide_render = True")
+                    emit(f"_units[{prev}].keyframe_insert(data_path='hide_render', frame={sf})")
+                    emit(f"_units[{prev}].hide_viewport = True")
+                    emit(f"_units[{prev}].keyframe_insert(data_path='hide_viewport', frame={sf})")
+                    # Restore on the assembly frame
+                    emit(f"_units[{prev}].hide_render = False")
+                    emit(f"_units[{prev}].keyframe_insert(data_path='hide_render', frame={af})")
+                    emit(f"_units[{prev}].hide_viewport = False")
+                    emit(f"_units[{prev}].keyframe_insert(data_path='hide_viewport', frame={af})")
+        emit()
+
     # ------------------------------------------------------------------
     # Set keyframe interpolation to constant (instant appear/disappear)
     # ------------------------------------------------------------------
     emit("# ── Set constant interpolation (instant visibility switch) ──")
-    emit("for obj in _units:")
+    emit("for obj in _units + _solo_objs:")
     emit("    if obj.animation_data and obj.animation_data.action:")
     emit("        for fcurve in obj.animation_data.action.fcurves:")
     emit("            for kp in fcurve.keyframe_points:")
@@ -257,12 +411,23 @@ def generate_assembly_animation(
     emit("txt.location = (600, -200)")
     emit("")
     emit("# Create text strip via handler that updates each frame")
+    # Emit frame→label map so the handler knows what to display
+    frame_labels: Dict[int, str] = {}
+    for idx in range(len(scene.units)):
+        sf = solo_frames[idx]
+        af = appear_frames[idx]
+        if sf is not None:
+            frame_labels[sf] = f"Unit {idx} (solo)"
+        frame_labels[af] = f"Unit {idx}"
+    emit(f"_frame_labels = {frame_labels!r}")
     emit("def _unit_label_handler(scene_ref):")
-    emit(f"    fpu = {frames_per_unit}")
     emit("    frame = scene_ref.frame_current")
-    emit("    unit_idx = min((frame - 1) // fpu, len(_units) - 1)")
-    emit("    # Update metadata text (shown in stamp)")
-    emit("    scene_ref.render.stamp_note_text = f'Unit {unit_idx}'")
+    emit("    # Walk backwards to find the most recent label")
+    emit("    label = ''")
+    emit("    for f in sorted(_frame_labels.keys()):")
+    emit("        if f <= frame:")
+    emit("            label = _frame_labels[f]")
+    emit("    scene_ref.render.stamp_note_text = label")
     emit("")
     emit("bpy.app.handlers.frame_change_pre.append(_unit_label_handler)")
     emit("scene.render.use_stamp = True")

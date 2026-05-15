@@ -211,6 +211,7 @@ def main(argv: list[str] | None = None) -> None:
             scene,
             output_path=args.output_script,
             frames_per_unit=frames_per_unit,
+            build=build,
             **kwargs,
         )
     elif args.simulate:
