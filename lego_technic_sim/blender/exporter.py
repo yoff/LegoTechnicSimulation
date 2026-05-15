@@ -393,7 +393,10 @@ def generate_blender_script(
             if axis_norm > 1e-12:
                 axis_bl = axis_bl / axis_norm
 
-            max_impulse = motor.max_torque * 100.0
+            # max_impulse = torque × dt; Blender's MOTOR constraint applies
+            # this cap per simulation frame.  Using torque / fps gives
+            # physically correct impulse per frame.
+            max_impulse = motor.max_torque / fps
             emit(f"# Motor {midx}: drives joint {motor.joint_index}")
             emit(f"#   axis = ({axis_bl[0]:.3f}, {axis_bl[1]:.3f}, {axis_bl[2]:.3f})")
             # Create a MOTOR constraint empty oriented so its X axis = hinge axis
