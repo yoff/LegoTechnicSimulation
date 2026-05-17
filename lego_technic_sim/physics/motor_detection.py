@@ -35,7 +35,7 @@ class MotorSpec:
 KNOWN_MOTORS: List[MotorSpec] = [
     MotorSpec(
         part_ids=["58121.dat", "58121c01.dat"],
-        speed=2.0,
+        speed=1.0,
         max_torque=0.4,
         label="XL Motor",
     ),

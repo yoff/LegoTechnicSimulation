@@ -160,6 +160,10 @@ def main(argv: list[str] | None = None) -> None:
     build = parser.parse_build(args.input_model)
     scene = build_units_and_joints(build)
 
+    # Resolve paths so the generated Blender script can find them
+    model_path = args.input_model.resolve()
+    ldraw_library = ldraw_lib.resolve() if ldraw_lib else None
+
     if args.drivetrain:
         from lego_technic_sim.physics.drive_train import build_drive_train
         from lego_technic_sim.blender.drivetrain_animation import (
@@ -212,6 +216,8 @@ def main(argv: list[str] | None = None) -> None:
             output_path=args.output_script,
             frames_per_unit=frames_per_unit,
             build=build,
+            model_path=model_path,
+            ldraw_library=ldraw_library,
             **kwargs,
         )
     elif args.simulate:
@@ -247,12 +253,16 @@ def main(argv: list[str] | None = None) -> None:
         if args.anchor_motor:
             kwargs["anchor_motor"] = True
 
-        generate_blender_script(scene, output_path=args.output_script, **kwargs)
+        generate_blender_script(scene, output_path=args.output_script,
+                               model_path=model_path,
+                               ldraw_library=ldraw_library, **kwargs)
 
     else:
         from lego_technic_sim.blender.exporter import generate_blender_script
 
-        generate_blender_script(scene, output_path=args.output_script)
+        generate_blender_script(scene, output_path=args.output_script,
+                               model_path=model_path,
+                               ldraw_library=ldraw_library)
 
     print(f"Parsed {len(build.parts)} parts")
     print(f"Built {len(scene.units)} rigid units")

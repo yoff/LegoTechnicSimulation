@@ -42,15 +42,7 @@ import numpy as np
 from ..physics.mesh_properties import LDU_TO_METERS
 from ..physics.model import Joint, JointType, Motor, PhysicsScene, Unit
 from ..physics.drive_train import build_drive_train
-
-
-def _ldraw_to_blender(v: np.ndarray) -> np.ndarray:
-    """Convert a 3-D point from LDraw space to Blender space.
-
-    LDraw: X right, Y down, Z toward viewer.
-    Blender: X right, Y toward viewer, Z up.
-    """
-    return np.array([v[0], -v[2], -v[1]], dtype=float)
+from .geometry import ldraw_to_blender as _ldraw_to_blender, collect_geometry
 
 
 def generate_blender_script(
@@ -67,6 +59,8 @@ def generate_blender_script(
     use_mesh: bool = True,
     follow_unit: Optional[int] = None,
     anchor_motor: bool = False,
+    model_path: Optional[Path] = None,
+    ldraw_library: Optional[Path] = None,
 ) -> str:
     """Generate a Blender Python script for the given physics scene.
 
@@ -87,12 +81,21 @@ def generate_blender_script(
         sim_frames:  Number of frames to simulate/render.
         use_mesh:    If True, create actual part meshes; if False, use cubes.
         follow_unit: If set, camera tracks this unit index during simulation.
+        model_path:  Absolute path to the ``.ldr`` model file.  When provided
+                     (together with *ldraw_library*), the generated script
+                     imports the package and parses the model at render time
+                     instead of embedding geometry inline.
+        ldraw_library: Absolute path to the LDraw parts library root.
 
     Returns:
         The generated Python script as a string.
     """
     if gravity is None:
         gravity = np.array([0.0, 0.0, -9.81])
+
+    # Determine whether to parse geometry at runtime (thin script) or
+    # embed it inline (legacy behaviour for tests / when paths are absent).
+    _runtime_geometry = model_path is not None and ldraw_library is not None
 
     lines: List[str] = []
 
@@ -111,6 +114,25 @@ def generate_blender_script(
     emit()
 
     # ------------------------------------------------------------------
+    # Runtime geometry preamble (when model/library paths are available)
+    # ------------------------------------------------------------------
+    if _runtime_geometry:
+        import lego_technic_sim as _pkg
+        pkg_root = str(Path(_pkg.__file__).resolve().parent.parent)
+        emit("# ── Parse model for geometry at render time ─────────────────")
+        emit("import sys")
+        emit(f"sys.path.insert(0, {pkg_root!r})")
+        emit("from lego_technic_sim.ldraw.parser import LDrawParser")
+        emit("from lego_technic_sim.physics.unit_builder import build_units_and_joints")
+        emit("from lego_technic_sim.blender.geometry import collect_geometry")
+        emit()
+        emit(f"print('Parsing LDraw model...')")
+        emit(f"_build = LDrawParser({str(ldraw_library)!r}).parse_build({str(model_path)!r})")
+        emit("_scene = build_units_and_joints(_build)")
+        emit(f"print(f'Loaded {{len(_scene.units)}} units')")
+        emit()
+
+    # ------------------------------------------------------------------
     # Scene setup
     # ------------------------------------------------------------------
     emit("# ── Scene setup ──────────────────────────────────────────────")
@@ -127,6 +149,8 @@ def generate_blender_script(
     emit("    bpy.ops.rigidbody.world_remove()")
     emit("bpy.ops.rigidbody.world_add()")
     emit("scene.rigidbody_world.time_scale = 1.0")
+    emit("scene.rigidbody_world.substeps_per_frame = 10")
+    emit("scene.rigidbody_world.solver_iterations = 10")
     emit(f"scene.rigidbody_world.point_cache.frame_end = {sim_frames}")
     emit(
         f"scene.gravity = ({gravity[0]:.6f}, {gravity[1]:.6f}, {gravity[2]:.6f})"
@@ -225,39 +249,46 @@ def generate_blender_script(
         emit(f"# Unit {idx}: {safe_name}")
 
         if use_mesh:
-            # Create real mesh from triangles
-            vertices: List[List[float]] = []
-            faces: List[List[int]] = []
-            vi = 0
-            for brick in unit.bricks:
-                for tri in brick.triangles:
-                    v0 = _ldraw_to_blender(tri.v0) * LDU_TO_METERS
-                    v1 = _ldraw_to_blender(tri.v1) * LDU_TO_METERS
-                    v2 = _ldraw_to_blender(tri.v2) * LDU_TO_METERS
-                    vertices.append([round(float(v0[0]), 7), round(float(v0[1]), 7), round(float(v0[2]), 7)])
-                    vertices.append([round(float(v1[0]), 7), round(float(v1[1]), 7), round(float(v1[2]), 7)])
-                    vertices.append([round(float(v2[0]), 7), round(float(v2[1]), 7), round(float(v2[2]), 7)])
-                    faces.append([vi, vi + 1, vi + 2])
-                    vi += 3
-
-            if vertices:
-                emit(f"_verts = {vertices!r}")
-                emit(f"_faces = {faces!r}")
-                emit(f"_mesh = bpy.data.meshes.new({safe_name + '_mesh'!r})")
-                emit("_mesh.from_pydata(_verts, [], _faces)")
-                emit("_mesh.update()")
-                emit(f"_obj = bpy.data.objects.new({safe_name!r}, _mesh)")
-                emit("bpy.context.collection.objects.link(_obj)")
-                emit("bpy.context.view_layer.objects.active = _obj")
-                emit("_obj.select_set(True)")
-            else:
+            if _runtime_geometry:
+                # Geometry loaded at render time from the parsed model
+                emit(f"_verts, _faces = collect_geometry(_scene.units[{idx}].bricks)")
+                emit("if _verts:")
+                emit(f"    _mesh = bpy.data.meshes.new({safe_name + '_mesh'!r})")
+                emit("    _mesh.from_pydata(_verts, [], _faces)")
+                emit("    _mesh.update()")
+                emit(f"    _obj = bpy.data.objects.new({safe_name!r}, _mesh)")
+                emit("    bpy.context.collection.objects.link(_obj)")
+                emit("    bpy.context.view_layer.objects.active = _obj")
+                emit("    _obj.select_set(True)")
+                emit("else:")
                 emit(
-                    f"bpy.ops.mesh.primitive_cube_add("
+                    f"    bpy.ops.mesh.primitive_cube_add("
                     f"size=0.005, "
                     f"location=({com_bl[0]:.6f}, {com_bl[1]:.6f}, {com_bl[2]:.6f}))"
                 )
-                emit("_obj = bpy.context.active_object")
-                emit(f"_obj.name = {safe_name!r}")
+                emit("    _obj = bpy.context.active_object")
+                emit(f"    _obj.name = {safe_name!r}")
+            else:
+                # Inline geometry (legacy path for tests)
+                vertices, faces = collect_geometry(unit.bricks)
+                if vertices:
+                    emit(f"_verts = {vertices!r}")
+                    emit(f"_faces = {faces!r}")
+                    emit(f"_mesh = bpy.data.meshes.new({safe_name + '_mesh'!r})")
+                    emit("_mesh.from_pydata(_verts, [], _faces)")
+                    emit("_mesh.update()")
+                    emit(f"_obj = bpy.data.objects.new({safe_name!r}, _mesh)")
+                    emit("bpy.context.collection.objects.link(_obj)")
+                    emit("bpy.context.view_layer.objects.active = _obj")
+                    emit("_obj.select_set(True)")
+                else:
+                    emit(
+                        f"bpy.ops.mesh.primitive_cube_add("
+                        f"size=0.005, "
+                        f"location=({com_bl[0]:.6f}, {com_bl[1]:.6f}, {com_bl[2]:.6f}))"
+                    )
+                    emit("_obj = bpy.context.active_object")
+                    emit(f"_obj.name = {safe_name!r}")
         else:
             emit(
                 f"bpy.ops.mesh.primitive_cube_add("
@@ -278,9 +309,9 @@ def generate_blender_script(
             emit("_obj.rigid_body.type = 'ACTIVE'")
         emit("_obj.rigid_body.collision_shape = 'CONVEX_HULL'")
         emit("_obj.rigid_body.friction = 0.5")
-        emit("_obj.rigid_body.restitution = 0.2")
-        emit("_obj.rigid_body.linear_damping = 0.1")
-        emit("_obj.rigid_body.angular_damping = 0.3")
+        emit("_obj.rigid_body.restitution = 0.0")
+        emit("_obj.rigid_body.linear_damping = 0.04")
+        emit("_obj.rigid_body.angular_damping = 0.1")
 
         # Material
         if render:
@@ -364,6 +395,7 @@ def generate_blender_script(
         emit(f"_con.rigid_body_constraint.object1 = _units[{joint.unit_a_index}]")
         emit(f"_con.rigid_body_constraint.object2 = _units[{joint.unit_b_index}]")
         emit("_con.rigid_body_constraint.disable_collisions = True")
+        emit("_con.rigid_body_constraint.use_breaking = False")
 
         if joint.joint_type == JointType.REVOLUTE:
             # Orient the constraint empty so its local Z aligns with the hinge axis
@@ -516,12 +548,18 @@ def generate_blender_script(
             )
 
     if scene.gears:
-        emit("# ── Gear meshes (collision exclusion) ─────────────────────")
+        emit("# ── Gear meshes ───────────────────────────────────────────")
+        emit("# Disable collision between meshing gears (their meshes are")
+        emit("# decorative — energy transfer is via MOTOR constraints).")
+        emit("# Also add a MOTOR constraint to couple their rotation at")
+        emit("# the correct gear ratio.  All gear units stay ACTIVE so the")
+        emit("# physics solver handles everything in one pass.")
         emit()
         for gidx, gc in enumerate(scene.gears):
             midpoint = _ldraw_to_blender(gc.position) * LDU_TO_METERS
             emit(f"# Gear mesh {gidx}: unit {gc.unit_a_index} ↔ unit {gc.unit_b_index}"
                  f" (ratio {gc.ratio:.3f})")
+            # Collision exclusion via disabled FIXED constraint
             emit(
                 f"bpy.ops.object.empty_add("
                 f"location=({midpoint[0]:.6f}, {midpoint[1]:.6f}, {midpoint[2]:.6f}))"
@@ -533,29 +571,69 @@ def generate_blender_script(
             emit(f"_gc.rigid_body_constraint.object2 = _units[{gc.unit_b_index}]")
             emit("_gc.rigid_body_constraint.disable_collisions = True")
             emit("_gc.rigid_body_constraint.enabled = False")
+            emit("_gc.rigid_body_constraint.use_breaking = False")
             emit()
 
     if gear_couplings:
-        emit("# ── Kinematic gear coupling ────────────────────────────────")
-        emit("# Driven gears are set to kinematic; after the physics bake,")
-        emit("# their rotation is overwritten based on the driving gear's")
-        emit("# baked rotation scaled by the gear ratio.")
-        emit()
-        # Mark driven gears as kinematic
-        driven_indices = {c[1] for c in gear_couplings}
-        for di in driven_indices:
-            emit(f"_units[{di}].rigid_body.kinematic = True")
+        emit("# ── Gear coupling (MOTOR constraints) ───────────────────────")
+        emit("# Each gear pair is coupled via a MOTOR constraint that drives")
+        emit("# the driven gear at target_velocity = driver_speed × ratio.")
+        emit("# The motor at the root of the drive tree sets the base speed;")
+        emit("# each downstream gear gets a MOTOR constraint with the correct")
+        emit("# velocity and high impulse to maintain coupling.")
         emit()
 
-        # Build the coupling data structure in the generated script
-        emit("_gear_couplings = [")
+        # Compute the cumulative target speed for each driven gear unit.
+        if scene.motors:
+            motor_speed = scene.motors[0].speed
+        else:
+            motor_speed = 2.0
+
+        # Walk the coupling chain to find absolute speed for each gear unit
+        unit_speeds: dict[int, float] = {}
+        if scene.motors:
+            motor_joint = scene.joints[scene.motors[0].joint_index]
+            root_gear_unit = motor_joint.unit_b_index
+        else:
+            root_gear_unit = gear_couplings[0][0]
+        unit_speeds[root_gear_unit] = motor_speed
+
+        # Multiple passes to propagate through the tree
+        for _ in range(len(gear_couplings)):
+            for driver_idx, driven_idx, ratio, _, _, _ in gear_couplings:
+                if driver_idx in unit_speeds and driven_idx not in unit_speeds:
+                    unit_speeds[driven_idx] = unit_speeds[driver_idx] * ratio
+
         for driver_idx, driven_idx, ratio, driver_axis, driven_axis, hinge_pos in gear_couplings:
-            emit(f"    ({driver_idx}, {driven_idx}, {ratio:.6f},")
-            emit(f"     mathutils.Vector(({driver_axis[0]:.6f}, {driver_axis[1]:.6f}, {driver_axis[2]:.6f})),")
-            emit(f"     mathutils.Vector(({driven_axis[0]:.6f}, {driven_axis[1]:.6f}, {driven_axis[2]:.6f})),")
-            emit(f"     mathutils.Vector(({hinge_pos[0]:.6f}, {hinge_pos[1]:.6f}, {hinge_pos[2]:.6f}))),")
-        emit("]")
-        emit()
+            driven_speed = unit_speeds.get(driven_idx, motor_speed * ratio)
+
+            emit(f"# Gear coupling: unit {driver_idx} → unit {driven_idx}"
+                 f" (ratio {ratio:.3f}, speed {driven_speed:.3f} rad/s)")
+            emit(
+                f"bpy.ops.object.empty_add("
+                f"location=({hinge_pos[0]:.6f}, {hinge_pos[1]:.6f}, {hinge_pos[2]:.6f}))"
+            )
+            emit("_gm = bpy.context.active_object")
+            emit(f"_gm.name = 'gear_motor_{driver_idx}_{driven_idx}'")
+            # Orient so local X aligns with driven gear hinge axis
+            emit(
+                f"_gax = mathutils.Vector("
+                f"({driven_axis[0]:.6f}, {driven_axis[1]:.6f}, {driven_axis[2]:.6f}))"
+            )
+            emit("_gx = mathutils.Vector((1.0, 0.0, 0.0))")
+            emit("_gm_rot = _gx.rotation_difference(_gax)")
+            emit("_gm.rotation_mode = 'QUATERNION'")
+            emit("_gm.rotation_quaternion = _gm_rot")
+            emit(f"bpy.ops.rigidbody.constraint_add(type='MOTOR')")
+            emit(f"_gm.rigid_body_constraint.object1 = _units[{driver_idx}]")
+            emit(f"_gm.rigid_body_constraint.object2 = _units[{driven_idx}]")
+            emit("_gm.rigid_body_constraint.use_motor_ang = True")
+            emit(f"_gm.rigid_body_constraint.motor_ang_target_velocity = {abs(driven_speed):.6f}")
+            # High impulse to maintain rigid coupling (like the reference file)
+            emit(f"_gm.rigid_body_constraint.motor_ang_max_impulse = 100.0")
+            emit("_gm.rigid_body_constraint.disable_collisions = True")
+            emit("_gm.rigid_body_constraint.use_breaking = False")
+            emit()
 
     # ------------------------------------------------------------------
     # Bake and render
@@ -568,37 +646,6 @@ def generate_blender_script(
     emit("with bpy.context.temp_override(**override):")
     emit("    bpy.ops.ptcache.bake(bake=True)")
     emit("print('Physics bake complete.')")
-
-    if gear_couplings:
-        emit()
-        emit("# ── Keyframe driven gears from baked physics ────────────────")
-        emit("# Store initial transforms for driven gears (frame 1)")
-        emit("scene.frame_set(scene.frame_start)")
-        emit("_driven_initial = {}")
-        emit("for _, driven_idx, *_ in _gear_couplings:")
-        emit("    _driven_initial[driven_idx] = _units[driven_idx].matrix_world.copy()")
-        emit("print('Applying gear couplings...')")
-        emit("for _f in range(scene.frame_start, scene.frame_end + 1):")
-        emit("    scene.frame_set(_f)")
-        emit("    for driver_idx, driven_idx, ratio, driver_axis, driven_axis, pivot in _gear_couplings:")
-        emit("        _drv = _units[driver_idx]")
-        emit("        _drvn = _units[driven_idx]")
-        emit("        # Read baked rotation of driving gear")
-        emit("        _drv_euler = _drv.matrix_world.to_euler('XYZ')")
-        emit("        _drv_rot = mathutils.Vector(_drv_euler).dot(driver_axis)")
-        emit("        # Compute driven rotation around hinge axis")
-        emit("        _driven_rot = _drv_rot * ratio")
-        emit("        _rot_mat = mathutils.Matrix.Rotation(_driven_rot, 4, driven_axis)")
-        emit("        _init = _driven_initial[driven_idx]")
-        emit("        _drvn.matrix_world = (")
-        emit("            mathutils.Matrix.Translation(pivot)")
-        emit("            @ _rot_mat")
-        emit("            @ mathutils.Matrix.Translation(-pivot)")
-        emit("            @ _init")
-        emit("        )")
-        emit("        _drvn.keyframe_insert(data_path='location', frame=_f)")
-        emit("        _drvn.keyframe_insert(data_path='rotation_euler', frame=_f)")
-        emit("print('Gear coupling complete.')")
 
     if render:
         emit()

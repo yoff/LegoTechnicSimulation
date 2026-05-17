@@ -21,11 +21,7 @@ from ..physics.connectors import is_connector
 from ..physics.mesh_properties import LDU_TO_METERS
 from ..physics.model import PhysicsScene, Unit
 from ..physics.unit_builder import _connector_shaft, _find_port_connections
-
-
-def _ldraw_to_blender(v: np.ndarray) -> np.ndarray:
-    """Convert a 3-D point from LDraw space to Blender space."""
-    return np.array([v[0], -v[2], -v[1]], dtype=float)
+from .geometry import ldraw_to_blender as _ldraw_to_blender, collect_geometry
 
 
 def _map_connectors_to_units(
@@ -82,6 +78,8 @@ def generate_assembly_animation(
     render_format: str = "FFMPEG",
     cycles_samples: int = 32,
     build: Optional[LDrawBuild] = None,
+    model_path: Optional[Path] = None,
+    ldraw_library: Optional[Path] = None,
 ) -> str:
     """Generate a Blender script that renders units appearing in sequence.
 
@@ -99,10 +97,17 @@ def generate_assembly_animation(
                          geometry (pins, axles) is included in the
                          visualisation and each unit (except 0) gets a solo
                          frame before appearing in the full assembly.
+        model_path:      Absolute path to the ``.ldr`` model file.  When
+                         provided (together with *ldraw_library*), the
+                         generated script parses the model at render time
+                         instead of embedding geometry inline.
+        ldraw_library:   Absolute path to the LDraw parts library root.
 
     Returns:
         The generated Python script as a string.
     """
+    _runtime_geometry = model_path is not None and ldraw_library is not None
+
     lines: List[str] = []
 
     def emit(text: str = "") -> None:
@@ -151,6 +156,33 @@ def generate_assembly_animation(
     emit("import mathutils")
     emit("import math")
     emit()
+
+    # ------------------------------------------------------------------
+    # Runtime geometry preamble
+    # ------------------------------------------------------------------
+    if _runtime_geometry:
+        import lego_technic_sim as _pkg
+        pkg_root = str(Path(_pkg.__file__).resolve().parent.parent)
+        emit("# ── Parse model for geometry at render time ─────────────────")
+        emit("import sys")
+        emit(f"sys.path.insert(0, {pkg_root!r})")
+        emit("from lego_technic_sim.ldraw.parser import LDrawParser")
+        emit("from lego_technic_sim.physics.unit_builder import build_units_and_joints")
+        emit("from lego_technic_sim.blender.geometry import collect_geometry")
+        emit()
+        emit(f"print('Parsing LDraw model...')")
+        emit(f"_build = LDrawParser({str(ldraw_library)!r}).parse_build({str(model_path)!r})")
+        emit("_scene = build_units_and_joints(_build)")
+        emit(f"print(f'Loaded {{len(_scene.units)}} units')")
+        # Connector-to-unit mapping (computed at emit time, small dict)
+        if connector_to_unit:
+            emit(f"_connector_to_unit = {connector_to_unit!r}")
+            emit("_unit_connectors = {}")
+            emit("for _ci, _uid in _connector_to_unit.items():")
+            emit("    _unit_connectors.setdefault(_uid, []).append(_build.parts[_ci])")
+        else:
+            emit("_unit_connectors = {}")
+        emit()
 
     # ------------------------------------------------------------------
     # Scene setup
@@ -229,23 +261,6 @@ def generate_assembly_animation(
     emit(f"_n_units = {len(scene.units)}")
     emit()
 
-    def _collect_triangles(bricks: List[LDrawPart]):
-        """Return (vertices, faces) lists for a set of bricks."""
-        vertices: List[List[float]] = []
-        faces: List[List[int]] = []
-        vi = 0
-        for brick in bricks:
-            for tri in brick.triangles:
-                v0 = _ldraw_to_blender(tri.v0) * LDU_TO_METERS
-                v1 = _ldraw_to_blender(tri.v1) * LDU_TO_METERS
-                v2 = _ldraw_to_blender(tri.v2) * LDU_TO_METERS
-                vertices.append([round(float(v0[0]), 7), round(float(v0[1]), 7), round(float(v0[2]), 7)])
-                vertices.append([round(float(v1[0]), 7), round(float(v1[1]), 7), round(float(v1[2]), 7)])
-                vertices.append([round(float(v2[0]), 7), round(float(v2[1]), 7), round(float(v2[2]), 7)])
-                faces.append([vi, vi + 1, vi + 2])
-                vi += 3
-        return vertices, faces
-
     # Compute appear frame for each unit.  Unit 0 has no solo frame;
     # every other unit gets a solo frame then an assembly frame.
     appear_frames: List[int] = []  # frame where unit appears in assembly
@@ -268,29 +283,48 @@ def generate_assembly_animation(
         appear_frame = appear_frames[idx]
         solo_frame = solo_frames[idx]
 
-        # All bricks in this unit plus its connectors
-        all_bricks = list(unit.bricks) + unit_connectors.get(idx, [])
-        vertices, faces = _collect_triangles(all_bricks)
-
         emit(f"# Unit {idx}: {safe_name} (appears at frame {appear_frame})")
 
-        if vertices:
-            emit(f"_verts = {vertices!r}")
-            emit(f"_faces = {faces!r}")
-            emit(f"_mesh = bpy.data.meshes.new({safe_name + '_mesh'!r})")
-            emit("_mesh.from_pydata(_verts, [], _faces)")
-            emit("_mesh.update()")
-            emit(f"_obj = bpy.data.objects.new({safe_name!r}, _mesh)")
-            emit("bpy.context.collection.objects.link(_obj)")
-        else:
-            # Fallback: empty cube if no geometry
+        if _runtime_geometry:
+            # Geometry loaded at render time from the parsed model
+            emit(f"_all_bricks = list(_scene.units[{idx}].bricks) + _unit_connectors.get({idx}, [])")
+            emit("_verts, _faces = collect_geometry(_all_bricks)")
+            emit("if _verts:")
+            emit(f"    _mesh = bpy.data.meshes.new({safe_name + '_mesh'!r})")
+            emit("    _mesh.from_pydata(_verts, [], _faces)")
+            emit("    _mesh.update()")
+            emit(f"    _obj = bpy.data.objects.new({safe_name!r}, _mesh)")
+            emit("    bpy.context.collection.objects.link(_obj)")
+            emit("else:")
             emit(
-                f"bpy.ops.mesh.primitive_cube_add("
+                f"    bpy.ops.mesh.primitive_cube_add("
                 f"size=0.005, "
                 f"location=({com_bl[0]:.6f}, {com_bl[1]:.6f}, {com_bl[2]:.6f}))"
             )
-            emit("_obj = bpy.context.active_object")
-            emit(f"_obj.name = {safe_name!r}")
+            emit("    _obj = bpy.context.active_object")
+            emit(f"    _obj.name = {safe_name!r}")
+            # Track whether we have geometry for the solo frame
+            emit("_has_geo = bool(_verts)")
+        else:
+            # Inline geometry (legacy path)
+            all_bricks = list(unit.bricks) + unit_connectors.get(idx, [])
+            vertices, faces = collect_geometry(all_bricks)
+            if vertices:
+                emit(f"_verts = {vertices!r}")
+                emit(f"_faces = {faces!r}")
+                emit(f"_mesh = bpy.data.meshes.new({safe_name + '_mesh'!r})")
+                emit("_mesh.from_pydata(_verts, [], _faces)")
+                emit("_mesh.update()")
+                emit(f"_obj = bpy.data.objects.new({safe_name!r}, _mesh)")
+                emit("bpy.context.collection.objects.link(_obj)")
+            else:
+                emit(
+                    f"bpy.ops.mesh.primitive_cube_add("
+                    f"size=0.005, "
+                    f"location=({com_bl[0]:.6f}, {com_bl[1]:.6f}, {com_bl[2]:.6f}))"
+                )
+                emit("_obj = bpy.context.active_object")
+                emit(f"_obj.name = {safe_name!r}")
 
         emit()
 
@@ -321,41 +355,51 @@ def generate_assembly_animation(
         emit()
 
         # Solo frame: show this unit alone for one frame before it joins
-        if solo_frame is not None and vertices:
-            emit(f"# Solo preview of unit {idx} at frame {solo_frame}")
-            solo_name = f"solo_{idx}"
-            emit(f"_solo_mesh = bpy.data.meshes.new({solo_name + '_mesh'!r})")
-            emit("_solo_mesh.from_pydata(_verts, [], _faces)")
-            emit("_solo_mesh.update()")
-            emit(f"_solo_obj = bpy.data.objects.new({solo_name!r}, _solo_mesh)")
-            emit("bpy.context.collection.objects.link(_solo_obj)")
-            # Use a brighter version of the same colour
-            emit(f"_smat = bpy.data.materials.new(name='solo_mat_{idx}')")
-            emit("_smat.use_nodes = True")
-            emit("_sbsdf = _smat.node_tree.nodes.get('Principled BSDF')")
-            emit("_sr, _sg, _sb = colorsys.hsv_to_rgb(_hue, 0.9, 1.0)")
-            emit("if _sbsdf:")
-            emit("    _sbsdf.inputs['Base Color'].default_value = (_sr, _sg, _sb, 1.0)")
-            emit("_solo_obj.data.materials.append(_smat)")
-            # Visible only on the solo frame
-            emit("_solo_obj.hide_viewport = True")
-            emit("_solo_obj.hide_render = True")
-            emit("_solo_obj.keyframe_insert(data_path='hide_viewport', frame=1)")
-            emit("_solo_obj.keyframe_insert(data_path='hide_render', frame=1)")
-            if solo_frame > 1:
-                emit(f"_solo_obj.keyframe_insert(data_path='hide_viewport', frame={solo_frame - 1})")
-                emit(f"_solo_obj.keyframe_insert(data_path='hide_render', frame={solo_frame - 1})")
-            emit("_solo_obj.hide_viewport = False")
-            emit("_solo_obj.hide_render = False")
-            emit(f"_solo_obj.keyframe_insert(data_path='hide_viewport', frame={solo_frame})")
-            emit(f"_solo_obj.keyframe_insert(data_path='hide_render', frame={solo_frame})")
-            # Hide again after the solo frame
-            emit("_solo_obj.hide_viewport = True")
-            emit("_solo_obj.hide_render = True")
-            emit(f"_solo_obj.keyframe_insert(data_path='hide_viewport', frame={solo_frame + 1})")
-            emit(f"_solo_obj.keyframe_insert(data_path='hide_render', frame={solo_frame + 1})")
-            emit("_solo_objs.append(_solo_obj)")
-            emit()
+        if solo_frame is not None:
+            if _runtime_geometry:
+                # Guard solo-frame creation with runtime geometry check
+                emit(f"if _has_geo:  # solo preview of unit {idx}")
+                _indent = "    "
+            elif vertices:
+                emit(f"# Solo preview of unit {idx} at frame {solo_frame}")
+                _indent = ""
+            else:
+                _indent = None  # skip — no geometry in inline path
+
+            if _indent is not None:
+                solo_name = f"solo_{idx}"
+                emit(f"{_indent}_solo_mesh = bpy.data.meshes.new({solo_name + '_mesh'!r})")
+                emit(f"{_indent}_solo_mesh.from_pydata(_verts, [], _faces)")
+                emit(f"{_indent}_solo_mesh.update()")
+                emit(f"{_indent}_solo_obj = bpy.data.objects.new({solo_name!r}, _solo_mesh)")
+                emit(f"{_indent}bpy.context.collection.objects.link(_solo_obj)")
+                # Use a brighter version of the same colour
+                emit(f"{_indent}_smat = bpy.data.materials.new(name='solo_mat_{idx}')")
+                emit(f"{_indent}_smat.use_nodes = True")
+                emit(f"{_indent}_sbsdf = _smat.node_tree.nodes.get('Principled BSDF')")
+                emit(f"{_indent}_sr, _sg, _sb = colorsys.hsv_to_rgb(_hue, 0.9, 1.0)")
+                emit(f"{_indent}if _sbsdf:")
+                emit(f"{_indent}    _sbsdf.inputs['Base Color'].default_value = (_sr, _sg, _sb, 1.0)")
+                emit(f"{_indent}_solo_obj.data.materials.append(_smat)")
+                # Visible only on the solo frame
+                emit(f"{_indent}_solo_obj.hide_viewport = True")
+                emit(f"{_indent}_solo_obj.hide_render = True")
+                emit(f"{_indent}_solo_obj.keyframe_insert(data_path='hide_viewport', frame=1)")
+                emit(f"{_indent}_solo_obj.keyframe_insert(data_path='hide_render', frame=1)")
+                if solo_frame > 1:
+                    emit(f"{_indent}_solo_obj.keyframe_insert(data_path='hide_viewport', frame={solo_frame - 1})")
+                    emit(f"{_indent}_solo_obj.keyframe_insert(data_path='hide_render', frame={solo_frame - 1})")
+                emit(f"{_indent}_solo_obj.hide_viewport = False")
+                emit(f"{_indent}_solo_obj.hide_render = False")
+                emit(f"{_indent}_solo_obj.keyframe_insert(data_path='hide_viewport', frame={solo_frame})")
+                emit(f"{_indent}_solo_obj.keyframe_insert(data_path='hide_render', frame={solo_frame})")
+                # Hide again after the solo frame
+                emit(f"{_indent}_solo_obj.hide_viewport = True")
+                emit(f"{_indent}_solo_obj.hide_render = True")
+                emit(f"{_indent}_solo_obj.keyframe_insert(data_path='hide_viewport', frame={solo_frame + 1})")
+                emit(f"{_indent}_solo_obj.keyframe_insert(data_path='hide_render', frame={solo_frame + 1})")
+                emit(f"{_indent}_solo_objs.append(_solo_obj)")
+                emit()
 
     # ------------------------------------------------------------------
     # Hide assembly units during solo frames
