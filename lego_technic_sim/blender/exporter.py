@@ -42,7 +42,11 @@ import numpy as np
 from ..physics.mesh_properties import LDU_TO_METERS
 from ..physics.model import Joint, JointType, Motor, PhysicsScene, Unit
 from ..physics.drive_train import build_drive_train
-from .geometry import ldraw_to_blender as _ldraw_to_blender, collect_geometry
+from .geometry import (
+    ldraw_to_blender as _ldraw_to_blender,
+    collect_geometry,
+    emit_kinematic_rotation,
+)
 
 
 def generate_blender_script(
@@ -532,11 +536,9 @@ def generate_blender_script(
             if node is None or hinge is None:
                 continue
 
-            # Compute rotation speed for this gear
             gear_speed = motor_speed * node.accumulated_ratio
             angle_per_frame = gear_speed / fps
 
-            # Hinge pivot and axis in Blender space
             pivot_bl = _ldraw_to_blender(hinge.position)
             axis_bl = _ldraw_to_blender(hinge.axis)
             ax_norm = float(np.linalg.norm(axis_bl))
@@ -545,25 +547,8 @@ def generate_blender_script(
 
             emit(f"# Gear unit {uid}: speed={gear_speed:.4f} rad/s, "
                  f"angle/frame={angle_per_frame:.6f}")
-            # Set object origin to hinge pivot for clean rotation
-            emit(f"_gu = _units[{uid}]")
-            emit(f"_pivot = mathutils.Vector(({pivot_bl[0]:.6f}, {pivot_bl[1]:.6f}, {pivot_bl[2]:.6f}))")
-            emit(f"_gaxis = mathutils.Vector(({axis_bl[0]:.6f}, {axis_bl[1]:.6f}, {axis_bl[2]:.6f}))")
-            # Shift mesh data so origin is at pivot
-            emit("_offset = _gu.location - _pivot")
-            emit("if _gu.data:")
-            emit("    for v in _gu.data.vertices:")
-            emit("        v.co += _offset")
-            emit("_gu.location = _pivot")
-            # Use axis-angle rotation; set axis, drive angle with driver
-            emit("_gu.rotation_mode = 'AXIS_ANGLE'")
-            emit(f"_gu.rotation_axis_angle = (0.0, {axis_bl[0]:.6f}, {axis_bl[1]:.6f}, {axis_bl[2]:.6f})")
-            # Add driver on the angle component (index 0)
-            emit("_drv = _gu.driver_add('rotation_axis_angle', 0)")
-            emit("_drv.driver.type = 'SCRIPTED'")
-            emit(f"_drv.driver.expression = 'frame * {angle_per_frame:.8f}'")
-            # Animated flag needed for PASSIVE rigid bodies to update
-            emit("_gu.rigid_body.kinematic = True")
+            emit_kinematic_rotation(emit, f"_units[{uid}]", pivot_bl, axis_bl, angle_per_frame)
+            emit("_kin_obj.rigid_body.kinematic = True")
             emit()
 
     # ------------------------------------------------------------------

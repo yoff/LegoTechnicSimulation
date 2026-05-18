@@ -6,7 +6,7 @@ the simulation exporter and the assembly-animation exporter.
 
 from __future__ import annotations
 
-from typing import List, Sequence, Tuple
+from typing import Callable, List, Sequence, Tuple
 
 import numpy as np
 
@@ -54,3 +54,37 @@ def collect_geometry(
             faces.append([vi, vi + 1, vi + 2])
             vi += 3
     return vertices, faces
+
+
+def emit_kinematic_rotation(
+    emit: Callable[[str], None],
+    obj_expr: str,
+    pivot: np.ndarray,
+    axis: np.ndarray,
+    angle_per_frame: float,
+) -> None:
+    """Emit Blender Python that sets up driver-based rotation for an object.
+
+    Relocates the object origin to *pivot*, sets rotation_mode to AXIS_ANGLE,
+    and adds a driver expression that rotates at *angle_per_frame* rad/frame
+    around *axis*.
+
+    Args:
+        emit: Line-emitter callback (appends to script).
+        obj_expr: Python expression referencing the Blender object.
+        pivot: Hinge pivot position in Blender space.
+        axis: Normalised rotation axis in Blender space.
+        angle_per_frame: Rotation increment per frame (rad).
+    """
+    emit(f"_kin_obj = {obj_expr}")
+    emit(f"_kin_pivot = mathutils.Vector(({pivot[0]:.6f}, {pivot[1]:.6f}, {pivot[2]:.6f}))")
+    emit("_kin_offset = _kin_obj.location - _kin_pivot")
+    emit("if _kin_obj.data:")
+    emit("    for v in _kin_obj.data.vertices:")
+    emit("        v.co += _kin_offset")
+    emit("_kin_obj.location = _kin_pivot")
+    emit("_kin_obj.rotation_mode = 'AXIS_ANGLE'")
+    emit(f"_kin_obj.rotation_axis_angle = (0.0, {axis[0]:.6f}, {axis[1]:.6f}, {axis[2]:.6f})")
+    emit("_kin_drv = _kin_obj.driver_add('rotation_axis_angle', 0)")
+    emit("_kin_drv.driver.type = 'SCRIPTED'")
+    emit(f"_kin_drv.driver.expression = 'frame * {angle_per_frame:.8f}'")

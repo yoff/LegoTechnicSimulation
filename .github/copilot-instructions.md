@@ -27,7 +27,7 @@ Key pipeline stages:
 ## Communicating via Animations
 
 Animations are the primary debugging tool for this project.  The user cannot
-run Blender locally — all visual feedback comes from rendered `.mp4` files.
+run Blender locally — all visual feedback comes from rendered `.mp4` files. Animations annotated with unit/joint/part numbers, gear ratios etc. make it easy for the user to give precise feedback. Generated animations are copied into the workspace, so the use can view them in a codespace context.
 
 ### Assembly Animation (`--assembly`)
 

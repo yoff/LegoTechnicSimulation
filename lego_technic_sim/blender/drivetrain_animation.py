@@ -14,7 +14,11 @@ import numpy as np
 
 from ..physics.drive_train import DriveNode, DriveTree
 from ..physics.model import Unit
-from .geometry import ldraw_to_blender as _ldraw_to_blender, collect_geometry
+from .geometry import (
+    ldraw_to_blender as _ldraw_to_blender,
+    collect_geometry,
+    emit_kinematic_rotation,
+)
 
 
 def _ldraw_axis_to_blender(a: np.ndarray) -> np.ndarray:
@@ -230,10 +234,7 @@ def generate_drivetrain_animation(
         emit(f"_obj.keyframe_insert(data_path='hide_render', frame={appear_frame})")
         emit()
 
-        # Rotation keyframes: spin around hinge joint axis at rate proportional
-        # to ratio.  The pivot and axis come from the revolute joint that
-        # connects this gear unit to its parent/frame — NOT from the gear mesh
-        # axis, which can differ for bevel gears.
+        # Rotation: spin around hinge joint axis at rate proportional to ratio.
         from ..physics.model import JointType
 
         hinge_joint = None
@@ -248,63 +249,25 @@ def generate_drivetrain_animation(
             pivot_bl = _ldraw_to_blender(hinge_joint.position)
             axis_bl = _ldraw_axis_to_blender(hinge_joint.axis)
         else:
-            # Fallback: use COM and gear mesh axis
             pivot_bl = _ldraw_to_blender(unit.center_of_mass)
             axis_bl = _ldraw_axis_to_blender(node.axis)
         norm = float(np.linalg.norm(axis_bl))
         if norm > 1e-12:
             axis_bl = axis_bl / norm
 
-        # Set origin to center of mass for rotation
-        emit(f"_obj.location = (0, 0, 0)")
-        emit(f"# Rotation pivot at hinge joint")
-        emit(f"_pivot = mathutils.Vector(({pivot_bl[0]:.6f}, {pivot_bl[1]:.6f}, {pivot_bl[2]:.6f}))")
-        emit(f"_axis = mathutils.Vector(({axis_bl[0]:.6f}, {axis_bl[1]:.6f}, {axis_bl[2]:.6f}))")
-        emit()
-
-        # Keyframe rotation: from appear_frame to end of its spin window
-        spin_start = appear_frame + appear_frames
-        # All nodes keep spinning once they appear (until end of animation)
-        # Angular displacement per frame: base_speed * ratio * (2π / spin_frames)
-        # So one full revolution per spin_frames at ratio=1
-        base_rps = 1.0  # revolutions per spin_frames
+        # One full revolution per spin_frames at ratio=1
+        base_rps = 1.0
         revolutions = node.accumulated_ratio * base_rps
         angle_per_frame = revolutions * 2.0 * np.pi / spin_frames
 
         emit(f"# Spin: ratio={node.accumulated_ratio:.3f}, "
              f"angle/frame={angle_per_frame:.4f} rad")
-        emit(f"_angle_per_frame = {angle_per_frame:.8f}")
-        emit(f"_spin_start = {spin_start}")
-        emit(f"_appear = {appear_frame}")
+        emit_kinematic_rotation(emit, "_obj", pivot_bl, axis_bl, angle_per_frame)
+        emit("_dt_objects.append(_kin_obj)")
         emit()
-
-        # We'll keyframe at spin_start and at the end of the animation
-        # Using a frame_change handler for smooth continuous rotation
-        emit(f"_dt_objects.append((_obj, _pivot, _axis, _angle_per_frame, _spin_start))")
-        emit()
-
-    # Frame handler for rotation
-    emit("# ── Rotation handler ──────────────────────────────────────────")
-    emit("def _drivetrain_spin(scene_ref):")
-    emit("    frame = scene_ref.frame_current")
-    emit("    for obj, pivot, axis, angle_per_frame, spin_start in _dt_objects:")
-    emit("        if frame < spin_start:")
-    emit("            continue")
-    emit("        elapsed = frame - spin_start")
-    emit("        angle = angle_per_frame * elapsed")
-    emit("        rot = mathutils.Matrix.Rotation(angle, 4, axis)")
-    emit("        # Apply rotation around pivot")
-    emit("        obj.matrix_world = (")
-    emit("            mathutils.Matrix.Translation(pivot)")
-    emit("            @ rot")
-    emit("            @ mathutils.Matrix.Translation(-pivot)")
-    emit("        )")
-    emit()
-    emit("bpy.app.handlers.frame_change_pre.append(_drivetrain_spin)")
-    emit()
 
     # Set constant interpolation for visibility
-    emit("for obj, *_ in _dt_objects:")
+    emit("for obj in _dt_objects:")
     emit("    if obj.animation_data and obj.animation_data.action:")
     emit("        for fcurve in obj.animation_data.action.fcurves:")
     emit("            for kp in fcurve.keyframe_points:")
