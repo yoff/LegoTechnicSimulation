@@ -443,6 +443,7 @@ def generate_blender_script(
 
         if is_output_joint and joint.joint_type == JointType.REVOLUTE:
             # Torque-limited MOTOR constraint at gear→leg interface
+            # We need BOTH a HINGE (positional constraint) and a MOTOR (drive).
             output_uid = ub if ub in output_units else ua
             node = unit_to_node.get(output_uid)
             if node and scene.motors:
@@ -457,32 +458,49 @@ def generate_blender_script(
                 output_speed = 1.0
 
             emit(
-                f"# Joint {idx}: OUTPUT MOTOR "
+                f"# Joint {idx}: OUTPUT HINGE+MOTOR "
                 f"(unit {ua} ↔ unit {ub}, torque-limited)"
             )
+            # First: HINGE to hold position
             emit(
                 f"bpy.ops.object.empty_add("
                 f"location=({pos_bl[0]:.6f}, {pos_bl[1]:.6f}, {pos_bl[2]:.6f}))"
             )
             emit("_con = bpy.context.active_object")
-            emit(f"_con.name = 'output_motor_{idx}'")
-            # Orient: local X must align with rotation axis
+            emit(f"_con.name = 'joint_{idx}'")
             emit(
                 f"_axis = mathutils.Vector("
                 f"({axis_bl[0]:.6f}, {axis_bl[1]:.6f}, {axis_bl[2]:.6f}))"
             )
-            emit("_x_axis = mathutils.Vector((1.0, 0.0, 0.0))")
-            emit("_om_rot = _x_axis.rotation_difference(_axis)")
+            emit("_up = mathutils.Vector((0.0, 0.0, 1.0))")
+            emit("_rot = _up.rotation_difference(_axis)")
             emit("_con.rotation_mode = 'QUATERNION'")
-            emit("_con.rotation_quaternion = _om_rot")
-            emit("bpy.ops.rigidbody.constraint_add(type='MOTOR')")
+            emit("_con.rotation_quaternion = _rot")
+            emit("bpy.ops.rigidbody.constraint_add(type='HINGE')")
             emit(f"_con.rigid_body_constraint.object1 = _units[{ua}]")
             emit(f"_con.rigid_body_constraint.object2 = _units[{ub}]")
-            emit("_con.rigid_body_constraint.use_motor_ang = True")
-            emit(f"_con.rigid_body_constraint.motor_ang_target_velocity = {abs(output_speed):.6f}")
-            emit(f"_con.rigid_body_constraint.motor_ang_max_impulse = {output_impulse:.6f}")
             emit("_con.rigid_body_constraint.disable_collisions = True")
             emit("_con.rigid_body_constraint.use_breaking = False")
+            emit()
+            # Second: MOTOR to drive rotation
+            emit(
+                f"bpy.ops.object.empty_add("
+                f"location=({pos_bl[0]:.6f}, {pos_bl[1]:.6f}, {pos_bl[2]:.6f}))"
+            )
+            emit("_mot = bpy.context.active_object")
+            emit(f"_mot.name = 'output_motor_{idx}'")
+            emit("_x_axis = mathutils.Vector((1.0, 0.0, 0.0))")
+            emit("_om_rot = _x_axis.rotation_difference(_axis)")
+            emit("_mot.rotation_mode = 'QUATERNION'")
+            emit("_mot.rotation_quaternion = _om_rot")
+            emit("bpy.ops.rigidbody.constraint_add(type='MOTOR')")
+            emit(f"_mot.rigid_body_constraint.object1 = _units[{ua}]")
+            emit(f"_mot.rigid_body_constraint.object2 = _units[{ub}]")
+            emit("_mot.rigid_body_constraint.use_motor_ang = True")
+            emit(f"_mot.rigid_body_constraint.motor_ang_target_velocity = {abs(output_speed):.6f}")
+            emit(f"_mot.rigid_body_constraint.motor_ang_max_impulse = {output_impulse:.6f}")
+            emit("_mot.rigid_body_constraint.disable_collisions = True")
+            emit("_mot.rigid_body_constraint.use_breaking = False")
         else:
             # Standard joint (HINGE, FIXED, SLIDER)
             blender_type = {
