@@ -153,8 +153,8 @@ def generate_blender_script(
     emit("    bpy.ops.rigidbody.world_remove()")
     emit("bpy.ops.rigidbody.world_add()")
     emit("scene.rigidbody_world.time_scale = 1.0")
-    emit("scene.rigidbody_world.substeps_per_frame = 10")
-    emit("scene.rigidbody_world.solver_iterations = 10")
+    emit("scene.rigidbody_world.substeps_per_frame = 60")
+    emit("scene.rigidbody_world.solver_iterations = 60")
     emit(f"scene.rigidbody_world.point_cache.frame_end = {sim_frames}")
     emit(
         f"scene.gravity = ({gravity[0]:.6f}, {gravity[1]:.6f}, {gravity[2]:.6f})"
