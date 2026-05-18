@@ -229,14 +229,57 @@ def generate_blender_script(
         emit()
 
     # ------------------------------------------------------------------
-    # Units → rigid bodies
+    # Build drive train for kinematic gear animation
     # ------------------------------------------------------------------
-    # Identify motor units (optionally PASSIVE to anchor the mechanism)
+    drive_tree = build_drive_train(scene)
+
+    # Identify unit roles:
+    # - kinematic_units: internal gears (PASSIVE, driver-animated)
+    # - output_units: drive-tree leaves that connect to dynamic legs (ACTIVE)
+    # - chassis_units: motor body (PASSIVE, static)
+    kinematic_units: set[int] = set()
+    output_units: set[int] = set()
+    chassis_unit: int = 0  # motor body
+
+    # Map unit → drive node for speed/axis lookup
+    unit_to_node: dict = {}
+
+    if drive_tree:
+        gear_unit_set = {n.unit_index for n in drive_tree.all_nodes}
+        for node in drive_tree.all_nodes:
+            unit_to_node[node.unit_index] = node
+
+        # Leaf nodes in drive tree (no children) are output units (cranks)
+        for node in drive_tree.all_nodes:
+            if not node.children:
+                output_units.add(node.unit_index)
+            else:
+                kinematic_units.add(node.unit_index)
+    else:
+        gear_unit_set = set()
+
+    # Chassis/motor units are always PASSIVE static
     _motor_unit_indices = set()
     if anchor_motor:
         for motor in scene.motors:
             joint = scene.joints[motor.joint_index]
             _motor_unit_indices.add(joint.unit_a_index)
+    # Always anchor the motor body in kinematic mode
+    if scene.motors:
+        motor_joint = scene.joints[scene.motors[0].joint_index]
+        chassis_unit = motor_joint.unit_a_index
+    _motor_unit_indices.add(chassis_unit)
+
+    # Find hinge joints for kinematic gear units (for driver animation)
+    # and for output units (for torque-limited MOTOR constraints)
+    unit_hinge: dict[int, Joint] = {}
+    for j in scene.joints:
+        if j.joint_type != JointType.REVOLUTE:
+            continue
+        for uid in (j.unit_a_index, j.unit_b_index):
+            if uid in kinematic_units or uid in output_units:
+                if uid not in unit_hinge:
+                    unit_hinge[uid] = j
 
     emit("# ── Units (rigid bodies) ─────────────────────────────────────")
     emit(f"_n_units = {len(scene.units)}")
@@ -302,9 +345,10 @@ def generate_blender_script(
         # Ensure minimum mass so physics solver doesn't skip bodies
         mass = max(unit.mass, 0.001)
         emit(f"_obj.rigid_body.mass = {mass:.6f}")
-        # Motor units are PASSIVE (anchored) so they drive without flying away
-        if idx in _motor_unit_indices:
+        # Kinematic units: motor body (static) and internal gears (animated)
+        if idx in _motor_unit_indices or idx in kinematic_units:
             emit("_obj.rigid_body.type = 'PASSIVE'")
+            emit("_obj.rigid_body.kinematic = True")
         else:
             emit("_obj.rigid_body.type = 'ACTIVE'")
         emit("_obj.rigid_body.collision_shape = 'CONVEX_HULL'")
@@ -364,202 +408,177 @@ def generate_blender_script(
     # ------------------------------------------------------------------
     # Joints → rigid body constraints
     # ------------------------------------------------------------------
+    # Skip joints between two kinematic/chassis units (no physics needed).
+    # Convert joints from chassis to output units into MOTOR constraints.
     emit("# ── Joints (constraints) ─────────────────────────────────────")
     emit("_joints = []")
     emit()
 
+    passive_set = _motor_unit_indices | kinematic_units
+
     for idx, joint in enumerate(scene.joints):
+        ua, ub = joint.unit_a_index, joint.unit_b_index
+        # Skip joints where both sides are kinematic/chassis
+        if ua in passive_set and ub in passive_set:
+            emit(f"# Joint {idx}: skipped (both units kinematic)")
+            emit("_joints.append(None)")
+            emit()
+            continue
+
         pos_bl = _ldraw_to_blender(joint.position)
         axis_bl = _ldraw_to_blender(joint.axis)
         axis_norm = float(np.linalg.norm(axis_bl))
         if axis_norm > 1e-12:
             axis_bl = axis_bl / axis_norm
 
-        blender_type = {
-            JointType.REVOLUTE: "HINGE",
-            JointType.FIXED: "FIXED",
-            JointType.SLIDER: "SLIDER",
-        }[joint.joint_type]
-
-        emit(
-            f"# Joint {idx}: {joint.joint_type.name} "
-            f"(unit {joint.unit_a_index} ↔ unit {joint.unit_b_index})"
+        # Check if this is an output joint (chassis → output crank)
+        is_output_joint = (
+            (ua in passive_set and ub in output_units) or
+            (ub in passive_set and ua in output_units)
         )
-        emit(
-            f"bpy.ops.object.empty_add("
-            f"location=({pos_bl[0]:.6f}, {pos_bl[1]:.6f}, {pos_bl[2]:.6f}))"
-        )
-        emit("_con = bpy.context.active_object")
-        emit(f"_con.name = 'joint_{idx}'")
-        emit(f"bpy.ops.rigidbody.constraint_add(type={blender_type!r})")
-        emit(f"_con.rigid_body_constraint.object1 = _units[{joint.unit_a_index}]")
-        emit(f"_con.rigid_body_constraint.object2 = _units[{joint.unit_b_index}]")
-        emit("_con.rigid_body_constraint.disable_collisions = True")
-        emit("_con.rigid_body_constraint.use_breaking = False")
 
-        if joint.joint_type == JointType.REVOLUTE:
-            # Orient the constraint empty so its local Z aligns with the hinge axis
+        if is_output_joint and joint.joint_type == JointType.REVOLUTE:
+            # Torque-limited MOTOR constraint at gear→leg interface
+            output_uid = ub if ub in output_units else ua
+            node = unit_to_node.get(output_uid)
+            if node and scene.motors:
+                motor_spec = scene.motors[0]
+                # Output torque = stall_torque / accumulated_ratio
+                # (gear reduction amplifies torque)
+                output_torque = motor_spec.max_torque / abs(node.accumulated_ratio)
+                output_impulse = output_torque / fps
+                output_speed = motor_spec.speed * node.accumulated_ratio
+            else:
+                output_impulse = 0.01
+                output_speed = 1.0
+
+            emit(
+                f"# Joint {idx}: OUTPUT MOTOR "
+                f"(unit {ua} ↔ unit {ub}, torque-limited)"
+            )
+            emit(
+                f"bpy.ops.object.empty_add("
+                f"location=({pos_bl[0]:.6f}, {pos_bl[1]:.6f}, {pos_bl[2]:.6f}))"
+            )
+            emit("_con = bpy.context.active_object")
+            emit(f"_con.name = 'output_motor_{idx}'")
+            # Orient: local X must align with rotation axis
             emit(
                 f"_axis = mathutils.Vector("
                 f"({axis_bl[0]:.6f}, {axis_bl[1]:.6f}, {axis_bl[2]:.6f}))"
             )
-            emit("_up = mathutils.Vector((0.0, 0.0, 1.0))")
-            emit("_rot = _up.rotation_difference(_axis)")
+            emit("_x_axis = mathutils.Vector((1.0, 0.0, 0.0))")
+            emit("_om_rot = _x_axis.rotation_difference(_axis)")
             emit("_con.rotation_mode = 'QUATERNION'")
-            emit("_con.rotation_quaternion = _rot")
+            emit("_con.rotation_quaternion = _om_rot")
+            emit("bpy.ops.rigidbody.constraint_add(type='MOTOR')")
+            emit(f"_con.rigid_body_constraint.object1 = _units[{ua}]")
+            emit(f"_con.rigid_body_constraint.object2 = _units[{ub}]")
+            emit("_con.rigid_body_constraint.use_motor_ang = True")
+            emit(f"_con.rigid_body_constraint.motor_ang_target_velocity = {abs(output_speed):.6f}")
+            emit(f"_con.rigid_body_constraint.motor_ang_max_impulse = {output_impulse:.6f}")
+            emit("_con.rigid_body_constraint.disable_collisions = True")
+            emit("_con.rigid_body_constraint.use_breaking = False")
+        else:
+            # Standard joint (HINGE, FIXED, SLIDER)
+            blender_type = {
+                JointType.REVOLUTE: "HINGE",
+                JointType.FIXED: "FIXED",
+                JointType.SLIDER: "SLIDER",
+            }[joint.joint_type]
+
+            emit(
+                f"# Joint {idx}: {joint.joint_type.name} "
+                f"(unit {ua} ↔ unit {ub})"
+            )
+            emit(
+                f"bpy.ops.object.empty_add("
+                f"location=({pos_bl[0]:.6f}, {pos_bl[1]:.6f}, {pos_bl[2]:.6f}))"
+            )
+            emit("_con = bpy.context.active_object")
+            emit(f"_con.name = 'joint_{idx}'")
+            emit(f"bpy.ops.rigidbody.constraint_add(type={blender_type!r})")
+            emit(f"_con.rigid_body_constraint.object1 = _units[{ua}]")
+            emit(f"_con.rigid_body_constraint.object2 = _units[{ub}]")
+            emit("_con.rigid_body_constraint.disable_collisions = True")
+            emit("_con.rigid_body_constraint.use_breaking = False")
+
+            if joint.joint_type == JointType.REVOLUTE:
+                emit(
+                    f"_axis = mathutils.Vector("
+                    f"({axis_bl[0]:.6f}, {axis_bl[1]:.6f}, {axis_bl[2]:.6f}))"
+                )
+                emit("_up = mathutils.Vector((0.0, 0.0, 1.0))")
+                emit("_rot = _up.rotation_difference(_axis)")
+                emit("_con.rotation_mode = 'QUATERNION'")
+                emit("_con.rotation_quaternion = _rot")
 
         emit("_joints.append(_con)")
         emit()
 
     # ------------------------------------------------------------------
-    # Motors — use dedicated MOTOR constraint (drives around local X axis)
+    # Kinematic gear animation (drivers on PASSIVE gear units)
     # ------------------------------------------------------------------
-    if scene.motors:
-        emit("# ── Motors ───────────────────────────────────────────────")
+    if kinematic_units and drive_tree and scene.motors:
+        motor_speed = scene.motors[0].speed
+        emit("# ── Kinematic gear animation (driver expressions) ──────────")
+        emit("# Internal gear units are PASSIVE and driven by scripted")
+        emit("# rotation expressions at exact gear ratios.")
         emit()
-        for midx, motor in enumerate(scene.motors):
-            joint = scene.joints[motor.joint_index]
-            pos_bl = _ldraw_to_blender(joint.position)
-            axis_bl = _ldraw_to_blender(joint.axis)
-            axis_norm = float(np.linalg.norm(axis_bl))
-            if axis_norm > 1e-12:
-                axis_bl = axis_bl / axis_norm
 
-            # max_impulse = torque × dt; Blender's MOTOR constraint applies
-            # this cap per simulation frame.  Using torque / fps gives
-            # physically correct impulse per frame.
-            max_impulse = motor.max_torque / fps
-            emit(f"# Motor {midx}: drives joint {motor.joint_index}")
-            emit(f"#   axis = ({axis_bl[0]:.3f}, {axis_bl[1]:.3f}, {axis_bl[2]:.3f})")
-            # Create a MOTOR constraint empty oriented so its X axis = hinge axis
-            emit(
-                f"bpy.ops.object.empty_add("
-                f"location=({pos_bl[0]:.6f}, {pos_bl[1]:.6f}, {pos_bl[2]:.6f}))"
-            )
-            emit("_mot = bpy.context.active_object")
-            emit(f"_mot.name = 'motor_{midx}'")
-            # Orient: local X must align with the rotation axis
-            emit(
-                f"_drive_axis = mathutils.Vector("
-                f"({axis_bl[0]:.6f}, {axis_bl[1]:.6f}, {axis_bl[2]:.6f}))"
-            )
-            emit("_x_axis = mathutils.Vector((1.0, 0.0, 0.0))")
-            emit("_mot_rot = _x_axis.rotation_difference(_drive_axis)")
-            emit("_mot.rotation_mode = 'QUATERNION'")
-            emit("_mot.rotation_quaternion = _mot_rot")
-            emit(f"bpy.ops.rigidbody.constraint_add(type='MOTOR')")
-            emit(f"_mot.rigid_body_constraint.object1 = _units[{joint.unit_a_index}]")
-            emit(f"_mot.rigid_body_constraint.object2 = _units[{joint.unit_b_index}]")
-            emit("_mot.rigid_body_constraint.use_motor_ang = True")
-            emit(f"_mot.rigid_body_constraint.motor_ang_target_velocity = {motor.speed:.6f}")
-            emit(f"_mot.rigid_body_constraint.motor_ang_max_impulse = {max_impulse:.6f}")
+        for uid in sorted(kinematic_units):
+            node = unit_to_node.get(uid)
+            hinge = unit_hinge.get(uid)
+            if node is None or hinge is None:
+                continue
+
+            # Compute rotation speed for this gear
+            gear_speed = motor_speed * node.accumulated_ratio
+            angle_per_frame = gear_speed / fps
+
+            # Hinge pivot and axis in Blender space
+            pivot_bl = _ldraw_to_blender(hinge.position)
+            axis_bl = _ldraw_to_blender(hinge.axis)
+            ax_norm = float(np.linalg.norm(axis_bl))
+            if ax_norm > 1e-12:
+                axis_bl = axis_bl / ax_norm
+
+            emit(f"# Gear unit {uid}: speed={gear_speed:.4f} rad/s, "
+                 f"angle/frame={angle_per_frame:.6f}")
+            # Set object origin to hinge pivot for clean rotation
+            emit(f"_gu = _units[{uid}]")
+            emit(f"_pivot = mathutils.Vector(({pivot_bl[0]:.6f}, {pivot_bl[1]:.6f}, {pivot_bl[2]:.6f}))")
+            emit(f"_gaxis = mathutils.Vector(({axis_bl[0]:.6f}, {axis_bl[1]:.6f}, {axis_bl[2]:.6f}))")
+            # Shift mesh data so origin is at pivot
+            emit("_offset = _gu.location - _pivot")
+            emit("if _gu.data:")
+            emit("    for v in _gu.data.vertices:")
+            emit("        v.co += _offset")
+            emit("_gu.location = _pivot")
+            # Use axis-angle rotation; set axis, drive angle with driver
+            emit("_gu.rotation_mode = 'AXIS_ANGLE'")
+            emit(f"_gu.rotation_axis_angle = (0.0, {axis_bl[0]:.6f}, {axis_bl[1]:.6f}, {axis_bl[2]:.6f})")
+            # Add driver on the angle component (index 0)
+            emit("_drv = _gu.driver_add('rotation_axis_angle', 0)")
+            emit("_drv.driver.type = 'SCRIPTED'")
+            emit(f"_drv.driver.expression = 'frame * {angle_per_frame:.8f}'")
+            # Animated flag needed for PASSIVE rigid bodies to update
+            emit("_gu.rigid_body.kinematic = True")
             emit()
 
     # ------------------------------------------------------------------
-    # Gear meshes — disable collisions and build kinematic coupling
+    # Gear mesh collision exclusion
     # ------------------------------------------------------------------
-    # Build drive tree to determine which gear drives which
-    drive_tree = build_drive_train(scene)
-    # Map: driven_unit_index → (driver_unit_index, ratio, driver_axis_bl, driven_axis_bl, hinge_pos_bl)
-    gear_couplings: list[tuple[int, int, float, np.ndarray, np.ndarray, np.ndarray]] = []
-
-    if drive_tree and scene.gears:
-        # Build parent map from drive tree
-        parent_map: dict[int, int] = {}
-        for node in drive_tree.all_nodes:
-            for child in node.children:
-                parent_map[child.unit_index] = node.unit_index
-
-        # Build map: (unit_a, unit_b) → joint for finding hinge positions
-        joint_map: dict[tuple[int, int], Joint] = {}
-        for j in scene.joints:
-            joint_map[(j.unit_a_index, j.unit_b_index)] = j
-            joint_map[(j.unit_b_index, j.unit_a_index)] = j
-
-        for gc in scene.gears:
-            # Determine which unit is the driver (closer to motor)
-            if gc.unit_a_index in parent_map and parent_map[gc.unit_a_index] == gc.unit_b_index:
-                # B drives A
-                driver_idx, driven_idx = gc.unit_b_index, gc.unit_a_index
-                ratio = 1.0 / gc.ratio  # invert: A is driven
-            elif gc.unit_b_index in parent_map and parent_map[gc.unit_b_index] == gc.unit_a_index:
-                # A drives B
-                driver_idx, driven_idx = gc.unit_a_index, gc.unit_b_index
-                ratio = gc.ratio
-            else:
-                continue  # Not in drive tree — skip coupling
-
-            # Find the hinge joints for driver and driven gears.
-            # The rotation axis is the joint hinge axis (the pin/axle the
-            # gear rotates around), NOT the gear-mesh tooth axis.
-            driver_hinge = None
-            driven_hinge = None
-            for j in scene.joints:
-                if j.joint_type != JointType.REVOLUTE:
-                    continue
-                if driver_idx in (j.unit_a_index, j.unit_b_index):
-                    if driver_hinge is None:
-                        driver_hinge = j
-                if driven_idx in (j.unit_a_index, j.unit_b_index):
-                    if driven_hinge is None:
-                        driven_hinge = j
-
-            if driven_hinge is not None:
-                hinge_pos = _ldraw_to_blender(driven_hinge.position)
-                driven_axis = _ldraw_to_blender(driven_hinge.axis)
-            else:
-                hinge_pos = _ldraw_to_blender(gc.position) * LDU_TO_METERS
-                driven_axis = _ldraw_to_blender(gc.axis_b if driven_idx == gc.unit_b_index else gc.axis_a)
-
-            if driver_hinge is not None:
-                driver_axis = _ldraw_to_blender(driver_hinge.axis)
-            else:
-                driver_axis = _ldraw_to_blender(gc.axis_a if driver_idx == gc.unit_a_index else gc.axis_b)
-
-            # Normalise axes
-            dn = float(np.linalg.norm(driver_axis))
-            if dn > 1e-12:
-                driver_axis = driver_axis / dn
-            dn2 = float(np.linalg.norm(driven_axis))
-            if dn2 > 1e-12:
-                driven_axis = driven_axis / dn2
-
-            # For meshing spur gears the driven gear spins opposite
-            # (teeth push in reverse).  For bevel gears with perpendicular
-            # axes we need to check the gear-mesh axes to determine sign.
-            gear_axis_a = gc.axis_a if driver_idx == gc.unit_a_index else gc.axis_b
-            gear_axis_b = gc.axis_b if driven_idx == gc.unit_b_index else gc.axis_a
-            ga_bl = _ldraw_to_blender(gear_axis_a)
-            gb_bl = _ldraw_to_blender(gear_axis_b)
-            ga_n = float(np.linalg.norm(ga_bl))
-            gb_n = float(np.linalg.norm(gb_bl))
-            if ga_n > 1e-12:
-                ga_bl = ga_bl / ga_n
-            if gb_n > 1e-12:
-                gb_bl = gb_bl / gb_n
-            dot = float(np.dot(ga_bl, gb_bl))
-            if dot > 0:
-                sign = -1.0
-            else:
-                sign = 1.0
-
-            gear_couplings.append(
-                (driver_idx, driven_idx, sign * ratio, driver_axis, driven_axis, hinge_pos)
-            )
-
     if scene.gears:
-        emit("# ── Gear meshes ───────────────────────────────────────────")
+        emit("# ── Gear mesh collision exclusion ───────────────────────────")
         emit("# Disable collision between meshing gears (their meshes are")
-        emit("# decorative — energy transfer is via MOTOR constraints).")
-        emit("# Also add a MOTOR constraint to couple their rotation at")
-        emit("# the correct gear ratio.  All gear units stay ACTIVE so the")
-        emit("# physics solver handles everything in one pass.")
+        emit("# decorative — power transfer is via kinematic animation +")
+        emit("# torque-limited MOTOR at the output).")
         emit()
         for gidx, gc in enumerate(scene.gears):
             midpoint = _ldraw_to_blender(gc.position) * LDU_TO_METERS
             emit(f"# Gear mesh {gidx}: unit {gc.unit_a_index} ↔ unit {gc.unit_b_index}"
                  f" (ratio {gc.ratio:.3f})")
-            # Collision exclusion via disabled FIXED constraint
             emit(
                 f"bpy.ops.object.empty_add("
                 f"location=({midpoint[0]:.6f}, {midpoint[1]:.6f}, {midpoint[2]:.6f}))"
@@ -574,65 +593,41 @@ def generate_blender_script(
             emit("_gc.rigid_body_constraint.use_breaking = False")
             emit()
 
-    if gear_couplings:
-        emit("# ── Gear coupling (MOTOR constraints) ───────────────────────")
-        emit("# Each gear pair is coupled via a MOTOR constraint that drives")
-        emit("# the driven gear at target_velocity = driver_speed × ratio.")
-        emit("# The motor at the root of the drive tree sets the base speed;")
-        emit("# each downstream gear gets a MOTOR constraint with the correct")
-        emit("# velocity and high impulse to maintain coupling.")
+    # ------------------------------------------------------------------
+    # Direct motor (fallback when no drive tree / no gears)
+    # ------------------------------------------------------------------
+    if scene.motors and not drive_tree:
+        emit("# ── Direct Motor ─────────────────────────────────────────────")
         emit()
-
-        # Compute the cumulative target speed for each driven gear unit.
-        if scene.motors:
-            motor_speed = scene.motors[0].speed
-        else:
-            motor_speed = 2.0
-
-        # Walk the coupling chain to find absolute speed for each gear unit
-        unit_speeds: dict[int, float] = {}
-        if scene.motors:
-            motor_joint = scene.joints[scene.motors[0].joint_index]
-            root_gear_unit = motor_joint.unit_b_index
-        else:
-            root_gear_unit = gear_couplings[0][0]
-        unit_speeds[root_gear_unit] = motor_speed
-
-        # Multiple passes to propagate through the tree
-        for _ in range(len(gear_couplings)):
-            for driver_idx, driven_idx, ratio, _, _, _ in gear_couplings:
-                if driver_idx in unit_speeds and driven_idx not in unit_speeds:
-                    unit_speeds[driven_idx] = unit_speeds[driver_idx] * ratio
-
-        for driver_idx, driven_idx, ratio, driver_axis, driven_axis, hinge_pos in gear_couplings:
-            driven_speed = unit_speeds.get(driven_idx, motor_speed * ratio)
-
-            emit(f"# Gear coupling: unit {driver_idx} → unit {driven_idx}"
-                 f" (ratio {ratio:.3f}, speed {driven_speed:.3f} rad/s)")
+        for midx, motor in enumerate(scene.motors):
+            joint = scene.joints[motor.joint_index]
+            pos_bl = _ldraw_to_blender(joint.position)
+            axis_bl = _ldraw_to_blender(joint.axis)
+            axis_norm = float(np.linalg.norm(axis_bl))
+            if axis_norm > 1e-12:
+                axis_bl = axis_bl / axis_norm
+            max_impulse = motor.max_torque / fps
+            emit(f"# Motor {midx}: drives joint {motor.joint_index}")
             emit(
                 f"bpy.ops.object.empty_add("
-                f"location=({hinge_pos[0]:.6f}, {hinge_pos[1]:.6f}, {hinge_pos[2]:.6f}))"
+                f"location=({pos_bl[0]:.6f}, {pos_bl[1]:.6f}, {pos_bl[2]:.6f}))"
             )
-            emit("_gm = bpy.context.active_object")
-            emit(f"_gm.name = 'gear_motor_{driver_idx}_{driven_idx}'")
-            # Orient so local X aligns with driven gear hinge axis
+            emit("_mot = bpy.context.active_object")
+            emit(f"_mot.name = 'motor_{midx}'")
             emit(
-                f"_gax = mathutils.Vector("
-                f"({driven_axis[0]:.6f}, {driven_axis[1]:.6f}, {driven_axis[2]:.6f}))"
+                f"_drive_axis = mathutils.Vector("
+                f"({axis_bl[0]:.6f}, {axis_bl[1]:.6f}, {axis_bl[2]:.6f}))"
             )
-            emit("_gx = mathutils.Vector((1.0, 0.0, 0.0))")
-            emit("_gm_rot = _gx.rotation_difference(_gax)")
-            emit("_gm.rotation_mode = 'QUATERNION'")
-            emit("_gm.rotation_quaternion = _gm_rot")
-            emit(f"bpy.ops.rigidbody.constraint_add(type='MOTOR')")
-            emit(f"_gm.rigid_body_constraint.object1 = _units[{driver_idx}]")
-            emit(f"_gm.rigid_body_constraint.object2 = _units[{driven_idx}]")
-            emit("_gm.rigid_body_constraint.use_motor_ang = True")
-            emit(f"_gm.rigid_body_constraint.motor_ang_target_velocity = {abs(driven_speed):.6f}")
-            # High impulse to maintain rigid coupling (like the reference file)
-            emit(f"_gm.rigid_body_constraint.motor_ang_max_impulse = 100.0")
-            emit("_gm.rigid_body_constraint.disable_collisions = True")
-            emit("_gm.rigid_body_constraint.use_breaking = False")
+            emit("_x_axis = mathutils.Vector((1.0, 0.0, 0.0))")
+            emit("_mot_rot = _x_axis.rotation_difference(_drive_axis)")
+            emit("_mot.rotation_mode = 'QUATERNION'")
+            emit("_mot.rotation_quaternion = _mot_rot")
+            emit("bpy.ops.rigidbody.constraint_add(type='MOTOR')")
+            emit(f"_mot.rigid_body_constraint.object1 = _units[{joint.unit_a_index}]")
+            emit(f"_mot.rigid_body_constraint.object2 = _units[{joint.unit_b_index}]")
+            emit("_mot.rigid_body_constraint.use_motor_ang = True")
+            emit(f"_mot.rigid_body_constraint.motor_ang_target_velocity = {motor.speed:.6f}")
+            emit(f"_mot.rigid_body_constraint.motor_ang_max_impulse = {max_impulse:.6f}")
             emit()
 
     # ------------------------------------------------------------------

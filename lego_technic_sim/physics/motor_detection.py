@@ -29,14 +29,15 @@ class MotorSpec:
     label: str
 
 
-# Known LEGO Technic motor parts and their approximate specs.
-# Speeds are rough estimates based on typical no-load RPM converted to rad/s.
-# Torques are approximate stall torques.
+# Known LEGO Technic motor parts and their measured specs.
+# Speeds are no-load RPM at 9 V, converted to rad/s.
+# Torques are approximate stall torques at 9 V.
+# Source: Philo's motor testing (philohome.com/motors/motorcomp.htm)
 KNOWN_MOTORS: List[MotorSpec] = [
     MotorSpec(
         part_ids=["58121.dat", "58121c01.dat"],
-        speed=1.0,
-        max_torque=0.4,
+        speed=23.04,        # 220 RPM at 9 V
+        max_torque=0.40,    # N·m stall torque
         label="XL Motor",
     ),
     MotorSpec(
