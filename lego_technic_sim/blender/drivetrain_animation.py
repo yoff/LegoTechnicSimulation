@@ -13,13 +13,8 @@ from typing import List, Optional
 import numpy as np
 
 from ..physics.drive_train import DriveNode, DriveTree
-from ..physics.mesh_properties import LDU_TO_METERS
 from ..physics.model import Unit
-
-
-def _ldraw_to_blender(v: np.ndarray) -> np.ndarray:
-    """Convert LDraw coords to Blender coords."""
-    return np.array([v[0], -v[2], -v[1]], dtype=float)
+from .geometry import ldraw_to_blender as _ldraw_to_blender, collect_geometry
 
 
 def _ldraw_axis_to_blender(a: np.ndarray) -> np.ndarray:
@@ -57,15 +52,24 @@ def generate_drivetrain_animation(
     nodes = tree.all_nodes
     n_nodes = len(nodes)
 
+    # Identify the motor body unit (appears with the first gear but doesn't spin)
+    motor_unit_idx: Optional[int] = None
+    if scene.motors:
+        motor_joint = scene.joints[scene.motors[0].joint_index]
+        motor_unit_idx = motor_joint.unit_a_index
+
     # Total frames: each node gets appear_frames + spin_frames
     total_frames = n_nodes * (appear_frames + spin_frames) + spin_frames
 
-    # Compute scene bounds for camera
+    # Compute scene bounds for camera (include motor unit if present)
     all_positions = []
     for node in nodes:
         unit = scene.units[node.unit_index]
         pos = _ldraw_to_blender(unit.center_of_mass)
         all_positions.append(pos)
+    if motor_unit_idx is not None:
+        motor_unit = scene.units[motor_unit_idx]
+        all_positions.append(_ldraw_to_blender(motor_unit.center_of_mass))
 
     if all_positions:
         positions_arr = np.array(all_positions)
@@ -136,24 +140,50 @@ def generate_drivetrain_animation(
     emit("_dt_objects = []")
     emit()
 
+    # Motor body (appears with the first gear, does not spin)
+    # Show only the motor brick(s), not the whole unit
+    if motor_unit_idx is not None:
+        from ..physics.motor_detection import is_motor_part
+        motor_unit = scene.units[motor_unit_idx]
+        motor_bricks = [b for b in motor_unit.bricks if is_motor_part(b.part_id)]
+        motor_name = "motor"
+        vertices, faces = collect_geometry(motor_bricks)
+
+        emit(f"# Motor brick (from unit {motor_unit_idx}, static)")
+        if vertices:
+            emit(f"_verts = {vertices!r}")
+            emit(f"_faces = {faces!r}")
+            emit(f"_mesh = bpy.data.meshes.new({motor_name + '_mesh'!r})")
+            emit("_mesh.from_pydata(_verts, [], _faces)")
+            emit("_mesh.update()")
+            emit(f"_motor_obj = bpy.data.objects.new({motor_name!r}, _mesh)")
+            emit("bpy.context.collection.objects.link(_motor_obj)")
+        else:
+            com_bl = _ldraw_to_blender(motor_unit.center_of_mass)
+            emit(f"bpy.ops.mesh.primitive_cube_add(size=0.005, "
+                 f"location=({com_bl[0]:.6f}, {com_bl[1]:.6f}, {com_bl[2]:.6f}))")
+            emit("_motor_obj = bpy.context.active_object")
+            emit(f"_motor_obj.name = {motor_name!r}")
+
+        # Dark grey material for motor
+        emit("_mmat = bpy.data.materials.new(name='mat_motor')")
+        emit("_mmat.use_nodes = True")
+        emit("_mbsdf = _mmat.node_tree.nodes.get('Principled BSDF')")
+        emit("if _mbsdf:")
+        emit("    _mbsdf.inputs['Base Color'].default_value = (0.25, 0.25, 0.25, 1.0)")
+        emit("_motor_obj.data.materials.append(_mmat)")
+        emit()
+
+        # Visible from frame 1 (same as first gear)
+        emit("_motor_obj.hide_viewport = False")
+        emit("_motor_obj.hide_render = False")
+        emit()
+
     for node_idx, node in enumerate(nodes):
         unit = scene.units[node.unit_index]
         safe_name = f"dt_{node_idx}_{unit.name}".replace('"', "")
 
-        # Collect mesh
-        vertices: List[List[float]] = []
-        faces: List[List[int]] = []
-        vi = 0
-        for brick in unit.bricks:
-            for tri in brick.triangles:
-                v0 = _ldraw_to_blender(tri.v0) * LDU_TO_METERS
-                v1 = _ldraw_to_blender(tri.v1) * LDU_TO_METERS
-                v2 = _ldraw_to_blender(tri.v2) * LDU_TO_METERS
-                vertices.append([round(float(v0[0]), 7), round(float(v0[1]), 7), round(float(v0[2]), 7)])
-                vertices.append([round(float(v1[0]), 7), round(float(v1[1]), 7), round(float(v1[2]), 7)])
-                vertices.append([round(float(v2[0]), 7), round(float(v2[1]), 7), round(float(v2[2]), 7)])
-                faces.append([vi, vi + 1, vi + 2])
-                vi += 3
+        vertices, faces = collect_geometry(unit.bricks)
 
         appear_frame = node_idx * (appear_frames + spin_frames) + 1
 
