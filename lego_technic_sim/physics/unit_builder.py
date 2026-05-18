@@ -562,14 +562,14 @@ def _build_via_connectors(
                     conn_part,
                 ))
         elif len(revolute_parts) >= 2:
-            # All revolute — store pairwise connections
-            for k in range(len(revolute_parts)):
-                for m in range(k + 1, len(revolute_parts)):
-                    revolute_connections.append((
-                        global_to_local[revolute_parts[k]],
-                        global_to_local[revolute_parts[m]],
-                        conn_part,
-                    ))
+            # All revolute — create chain (N-1 joints, not all pairs)
+            # This avoids over-constraining when 3+ parts share one pin.
+            for k in range(len(revolute_parts) - 1):
+                revolute_connections.append((
+                    global_to_local[revolute_parts[k]],
+                    global_to_local[revolute_parts[k + 1]],
+                    conn_part,
+                ))
 
     # Parallel-pin rigidity: if two or more frictionless pins connect the
     # same pair of structural parts, the connection is over-constrained and

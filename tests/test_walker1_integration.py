@@ -65,8 +65,8 @@ class TestWalker1Counts:
 
     def test_joint_count(self, walker1):
         _, scene = walker1
-        assert len(scene.joints) == 50, (
-            f"Expected 50 joints, got {len(scene.joints)}"
+        assert len(scene.joints) == 42, (
+            f"Expected 42 joints, got {len(scene.joints)}"
         )
 
     def test_gear_mesh_count(self, walker1):
