@@ -66,19 +66,52 @@ class DriveTree:
 
 
 def _find_root_unit(scene: PhysicsScene) -> Optional[int]:
-    """Find the drive root: motor unit or crank unit.
+    """Find the drive root: the first gear on the motor output shaft.
+
+    Among gear-participating units that have a revolute joint to the motor
+    body, picks the leaf in the gear-mesh graph (only 1 gear connection)
+    with the fewest bricks (smallest gear).  Falls back to motor joint's
+    unit_b or crank unit.
 
     Returns the unit index, or None if no motor/crank found.
     """
     from .motor_detection import is_motor_part
+    from .model import JointType
 
-    # Prefer motor-driven units (via revolute joint)
     if scene.motors:
         motor = scene.motors[0]
-        joint = scene.joints[motor.joint_index]
-        # Start from the driven unit (unit_b), not the motor body,
-        # since the drive train follows gear meshes from the output gear.
-        return joint.unit_b_index
+        motor_joint = scene.joints[motor.joint_index]
+        motor_body = motor_joint.unit_a_index
+
+        # Build gear-mesh degree map
+        gear_degree: Dict[int, int] = {}
+        for gc in scene.gears:
+            gear_degree[gc.unit_a_index] = gear_degree.get(gc.unit_a_index, 0) + 1
+            gear_degree[gc.unit_b_index] = gear_degree.get(gc.unit_b_index, 0) + 1
+
+        # Find gear units connected to motor body via revolute joint
+        candidates = []
+        for j in scene.joints:
+            if j.joint_type != JointType.REVOLUTE:
+                continue
+            if j.unit_a_index == motor_body and j.unit_b_index in gear_degree:
+                candidates.append(j.unit_b_index)
+            elif j.unit_b_index == motor_body and j.unit_a_index in gear_degree:
+                candidates.append(j.unit_a_index)
+
+        if candidates:
+            # Prefer leaf nodes (degree 1) in the gear mesh graph
+            leaves = [u for u in candidates if gear_degree.get(u, 0) == 1]
+            if leaves:
+                # Among leaves, pick the smallest gear (fewest bricks)
+                leaves.sort(key=lambda u: len(scene.units[u].bricks))
+                return leaves[0]
+            # No leaves — pick candidate with fewest bricks
+            candidates.sort(key=lambda u: len(scene.units[u].bricks))
+            return candidates[0]
+
+        # Fallback: motor joint's unit_b
+        return motor_joint.unit_b_index
 
     # Look for a unit containing a motor part (may drive via gear mesh)
     for unit_idx, unit in enumerate(scene.units):

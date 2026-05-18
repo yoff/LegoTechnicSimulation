@@ -311,7 +311,7 @@ def generate_drivetrain_animation(
     emit("                kp.interpolation = 'CONSTANT'")
     emit()
 
-    # Stamp overlay
+    # Stamp overlay with per-frame unit labels
     emit("scene.render.use_stamp = True")
     emit("scene.render.use_stamp_note = True")
     emit("scene.render.stamp_font_size = 24")
@@ -326,7 +326,26 @@ def generate_drivetrain_animation(
     emit("scene.render.use_stamp_hostname = False")
     emit("scene.render.stamp_foreground = (1, 1, 1, 1)")
     emit("scene.render.stamp_background = (0, 0, 0, 0.6)")
-    emit(f"scene.render.stamp_note_text = 'Drive Train'")
+    emit()
+
+    # Build frame→label map
+    frame_labels: dict[int, str] = {}
+    for node_idx, node in enumerate(nodes):
+        af = node_idx * (appear_frames + spin_frames) + 1
+        frame_labels[af] = (
+            f"Unit {node.unit_index} (depth={node.depth}, "
+            f"ratio={node.accumulated_ratio:.2f})"
+        )
+    emit(f"_frame_labels = {frame_labels!r}")
+    emit("def _dt_label_handler(scene_ref):")
+    emit("    frame = scene_ref.frame_current")
+    emit("    label = 'Drive Train'")
+    emit("    for f in sorted(_frame_labels.keys()):")
+    emit("        if f <= frame:")
+    emit("            label = _frame_labels[f]")
+    emit("    scene_ref.render.stamp_note_text = label")
+    emit()
+    emit("bpy.app.handlers.frame_change_pre.append(_dt_label_handler)")
     emit()
 
     # Compositing
