@@ -63,6 +63,7 @@ def generate_blender_script(
     use_mesh: bool = True,
     follow_unit: Optional[int] = None,
     anchor_motor: bool = False,
+    collision_mode: str = "convex_hull",
     model_path: Optional[Path] = None,
     ldraw_library: Optional[Path] = None,
 ) -> str:
@@ -355,11 +356,19 @@ def generate_blender_script(
             emit("_obj.rigid_body.kinematic = True")
         else:
             emit("_obj.rigid_body.type = 'ACTIVE'")
-        emit("_obj.rigid_body.collision_shape = 'CONVEX_HULL'")
+        _shape = {"convex_hull": "CONVEX_HULL", "mesh": "MESH", "none": "CONVEX_HULL"}[collision_mode]
+        emit(f"_obj.rigid_body.collision_shape = '{_shape}'")
+        if collision_mode == "mesh":
+            emit("_obj.rigid_body.mesh_source = 'FINAL'")
         emit("_obj.rigid_body.friction = 0.5")
         emit("_obj.rigid_body.restitution = 0.0")
         emit("_obj.rigid_body.linear_damping = 0.04")
         emit("_obj.rigid_body.angular_damping = 0.1")
+        if collision_mode == "none":
+            # Put units in collision collection 1 (not 0) so they only
+            # collide with objects in collection 1 (i.e. the ground).
+            emit("_obj.rigid_body.collision_collections[0] = False")
+            emit("_obj.rigid_body.collision_collections[1] = True")
 
         # Material
         if render:
@@ -400,6 +409,9 @@ def generate_blender_script(
     emit("_ground.rigid_body.type = 'PASSIVE'")
     emit("_ground.rigid_body.collision_shape = 'BOX'")
     emit("_ground.rigid_body.friction = 0.8")
+    if collision_mode == "none":
+        # Ground must be in collection 1 to collide with units
+        emit("_ground.rigid_body.collision_collections[1] = True")
     if render:
         emit("_gmat = bpy.data.materials.new(name='ground_mat')")
         emit("_gmat.use_nodes = True")

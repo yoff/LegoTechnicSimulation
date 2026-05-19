@@ -135,6 +135,17 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Make motor units passive (fixed in space) for testing the drive train.",
     )
     p.add_argument(
+        "--collision",
+        choices=["convex_hull", "mesh", "none"],
+        default="convex_hull",
+        help=(
+            "Collision shape for rigid bodies. 'convex_hull' (default) uses a "
+            "solid bounding shape (fast but oversized for hollow parts). "
+            "'mesh' uses exact triangle geometry (accurate but slower). "
+            "'none' disables all inter-unit collisions (only ground collides)."
+        ),
+    )
+    p.add_argument(
         "--fast",
         action="store_true",
         help=(
@@ -252,6 +263,9 @@ def main(argv: list[str] | None = None) -> None:
 
         if args.anchor_motor:
             kwargs["anchor_motor"] = True
+
+        if args.collision:
+            kwargs["collision_mode"] = args.collision
 
         generate_blender_script(scene, output_path=args.output_script,
                                model_path=model_path,
