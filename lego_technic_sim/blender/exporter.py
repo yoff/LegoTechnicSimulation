@@ -286,6 +286,62 @@ def generate_blender_script(
                 if uid not in unit_hinge:
                     unit_hinge[uid] = j
 
+    # ------------------------------------------------------------------
+    # Kinematic closure: detect units in closed loops back to the
+    # kinematic zone.  These units' positions are fully determined by
+    # the crank angles, so they should be kinematic too.
+    # ------------------------------------------------------------------
+    # Build adjacency graph (revolute joints only — fixed joints are rigid)
+    from collections import defaultdict, deque
+    adj: dict[int, set[int]] = defaultdict(set)
+    for j in scene.joints:
+        if j.joint_type == JointType.REVOLUTE:
+            adj[j.unit_a_index].add(j.unit_b_index)
+            adj[j.unit_b_index].add(j.unit_a_index)
+
+    # Seed: chassis + kinematic gears + output cranks
+    kinematic_zone = _motor_unit_indices | kinematic_units | output_units
+
+    # Kinematic closure: a non-kinematic unit is part of a closed loop if
+    # it lies on a path between two kinematic-zone units (through other
+    # non-kinematic units).  Detect by finding connected components of
+    # non-kinematic units that touch >=2 kinematic-zone units.
+    non_kin = set(range(len(scene.units))) - kinematic_zone
+    visited_nk: set[int] = set()
+    for start in non_kin:
+        if start in visited_nk:
+            continue
+        # BFS to find this connected component (through non-kin units only)
+        component: set[int] = set()
+        queue: deque[int] = deque([start])
+        kin_neighbors: set[int] = set()
+        while queue:
+            u = queue.popleft()
+            if u in component:
+                continue
+            component.add(u)
+            for nb in adj[u]:
+                if nb in kinematic_zone:
+                    kin_neighbors.add(nb)
+                elif nb not in component:
+                    queue.append(nb)
+        visited_nk |= component
+        # If this component connects to >=2 kinematic-zone units, all its
+        # members are in a closed loop and should be kinematic.
+        if len(kin_neighbors) >= 2:
+            kinematic_zone |= component
+
+    # Units added by closure (not gears/motor/output)
+    linkage_units = kinematic_zone - _motor_unit_indices - kinematic_units - output_units
+
+    # Find hinge pivots for linkage units too
+    for j in scene.joints:
+        if j.joint_type != JointType.REVOLUTE:
+            continue
+        for uid in (j.unit_a_index, j.unit_b_index):
+            if uid in linkage_units and uid not in unit_hinge:
+                unit_hinge[uid] = j
+
     emit("# ── Units (rigid bodies) ─────────────────────────────────────")
     emit(f"_n_units = {len(scene.units)}")
     emit("_units = []")
@@ -350,8 +406,8 @@ def generate_blender_script(
         # Ensure minimum mass so physics solver doesn't skip bodies
         mass = max(unit.mass, 0.001)
         emit(f"_obj.rigid_body.mass = {mass:.6f}")
-        # Kinematic units: motor body (static) and internal gears (animated)
-        if idx in _motor_unit_indices or idx in kinematic_units:
+        # Kinematic units: motor body, gears, output cranks, and linkage units
+        if idx in kinematic_zone:
             emit("_obj.rigid_body.type = 'PASSIVE'")
             emit("_obj.rigid_body.kinematic = True")
         else:
@@ -430,11 +486,13 @@ def generate_blender_script(
     emit("_joints = []")
     emit()
 
-    passive_set = _motor_unit_indices | kinematic_units
+    # All kinematic-zone units (gears, cranks, linkage) stay PASSIVE.
+    # Skip joints between them — their motion is handled kinematically.
+    passive_set = kinematic_zone
 
     for idx, joint in enumerate(scene.joints):
         ua, ub = joint.unit_a_index, joint.unit_b_index
-        # Skip joints where both sides are kinematic/chassis
+        # Skip joints where both sides are kinematic
         if ua in passive_set and ub in passive_set:
             emit(f"# Joint {idx}: skipped (both units kinematic)")
             emit("_joints.append(None)")
@@ -447,39 +505,30 @@ def generate_blender_script(
         if axis_norm > 1e-12:
             axis_bl = axis_bl / axis_norm
 
-        # Check if this is an output joint (chassis → output crank)
-        is_output_joint = (
-            (ua in passive_set and ub in output_units) or
-            (ub in passive_set and ua in output_units)
+        # Standard joint (HINGE, FIXED, SLIDER)
+        blender_type = {
+            JointType.REVOLUTE: "HINGE",
+            JointType.FIXED: "FIXED",
+            JointType.SLIDER: "SLIDER",
+        }[joint.joint_type]
+
+        emit(
+            f"# Joint {idx}: {joint.joint_type.name} "
+            f"(unit {ua} ↔ unit {ub})"
         )
+        emit(
+            f"bpy.ops.object.empty_add("
+            f"location=({pos_bl[0]:.6f}, {pos_bl[1]:.6f}, {pos_bl[2]:.6f}))"
+        )
+        emit("_con = bpy.context.active_object")
+        emit(f"_con.name = 'joint_{idx}'")
+        emit(f"bpy.ops.rigidbody.constraint_add(type={blender_type!r})")
+        emit(f"_con.rigid_body_constraint.object1 = _units[{ua}]")
+        emit(f"_con.rigid_body_constraint.object2 = _units[{ub}]")
+        emit("_con.rigid_body_constraint.disable_collisions = True")
+        emit("_con.rigid_body_constraint.use_breaking = False")
 
-        if is_output_joint and joint.joint_type == JointType.REVOLUTE:
-            # Torque-limited MOTOR constraint at gear→leg interface
-            # We need BOTH a HINGE (positional constraint) and a MOTOR (drive).
-            output_uid = ub if ub in output_units else ua
-            node = unit_to_node.get(output_uid)
-            if node and scene.motors:
-                motor_spec = scene.motors[0]
-                # Output torque = stall_torque / accumulated_ratio
-                # (gear reduction amplifies torque)
-                output_torque = motor_spec.max_torque / abs(node.accumulated_ratio)
-                output_impulse = output_torque / fps
-                output_speed = motor_spec.speed * node.accumulated_ratio
-            else:
-                output_impulse = 0.01
-                output_speed = 1.0
-
-            emit(
-                f"# Joint {idx}: OUTPUT HINGE+MOTOR "
-                f"(unit {ua} ↔ unit {ub}, torque-limited)"
-            )
-            # First: HINGE to hold position
-            emit(
-                f"bpy.ops.object.empty_add("
-                f"location=({pos_bl[0]:.6f}, {pos_bl[1]:.6f}, {pos_bl[2]:.6f}))"
-            )
-            emit("_con = bpy.context.active_object")
-            emit(f"_con.name = 'joint_{idx}'")
+        if joint.joint_type == JointType.REVOLUTE:
             emit(
                 f"_axis = mathutils.Vector("
                 f"({axis_bl[0]:.6f}, {axis_bl[1]:.6f}, {axis_bl[2]:.6f}))"
@@ -488,64 +537,6 @@ def generate_blender_script(
             emit("_rot = _up.rotation_difference(_axis)")
             emit("_con.rotation_mode = 'QUATERNION'")
             emit("_con.rotation_quaternion = _rot")
-            emit("bpy.ops.rigidbody.constraint_add(type='HINGE')")
-            emit(f"_con.rigid_body_constraint.object1 = _units[{ua}]")
-            emit(f"_con.rigid_body_constraint.object2 = _units[{ub}]")
-            emit("_con.rigid_body_constraint.disable_collisions = True")
-            emit("_con.rigid_body_constraint.use_breaking = False")
-            emit()
-            # Second: MOTOR to drive rotation
-            emit(
-                f"bpy.ops.object.empty_add("
-                f"location=({pos_bl[0]:.6f}, {pos_bl[1]:.6f}, {pos_bl[2]:.6f}))"
-            )
-            emit("_mot = bpy.context.active_object")
-            emit(f"_mot.name = 'output_motor_{idx}'")
-            emit("_x_axis = mathutils.Vector((1.0, 0.0, 0.0))")
-            emit("_om_rot = _x_axis.rotation_difference(_axis)")
-            emit("_mot.rotation_mode = 'QUATERNION'")
-            emit("_mot.rotation_quaternion = _om_rot")
-            emit("bpy.ops.rigidbody.constraint_add(type='MOTOR')")
-            emit(f"_mot.rigid_body_constraint.object1 = _units[{ua}]")
-            emit(f"_mot.rigid_body_constraint.object2 = _units[{ub}]")
-            emit("_mot.rigid_body_constraint.use_motor_ang = True")
-            emit(f"_mot.rigid_body_constraint.motor_ang_target_velocity = {abs(output_speed):.6f}")
-            emit(f"_mot.rigid_body_constraint.motor_ang_max_impulse = {output_impulse:.6f}")
-            emit("_mot.rigid_body_constraint.disable_collisions = True")
-            emit("_mot.rigid_body_constraint.use_breaking = False")
-        else:
-            # Standard joint (HINGE, FIXED, SLIDER)
-            blender_type = {
-                JointType.REVOLUTE: "HINGE",
-                JointType.FIXED: "FIXED",
-                JointType.SLIDER: "SLIDER",
-            }[joint.joint_type]
-
-            emit(
-                f"# Joint {idx}: {joint.joint_type.name} "
-                f"(unit {ua} ↔ unit {ub})"
-            )
-            emit(
-                f"bpy.ops.object.empty_add("
-                f"location=({pos_bl[0]:.6f}, {pos_bl[1]:.6f}, {pos_bl[2]:.6f}))"
-            )
-            emit("_con = bpy.context.active_object")
-            emit(f"_con.name = 'joint_{idx}'")
-            emit(f"bpy.ops.rigidbody.constraint_add(type={blender_type!r})")
-            emit(f"_con.rigid_body_constraint.object1 = _units[{ua}]")
-            emit(f"_con.rigid_body_constraint.object2 = _units[{ub}]")
-            emit("_con.rigid_body_constraint.disable_collisions = True")
-            emit("_con.rigid_body_constraint.use_breaking = False")
-
-            if joint.joint_type == JointType.REVOLUTE:
-                emit(
-                    f"_axis = mathutils.Vector("
-                    f"({axis_bl[0]:.6f}, {axis_bl[1]:.6f}, {axis_bl[2]:.6f}))"
-                )
-                emit("_up = mathutils.Vector((0.0, 0.0, 1.0))")
-                emit("_rot = _up.rotation_difference(_axis)")
-                emit("_con.rotation_mode = 'QUATERNION'")
-                emit("_con.rotation_quaternion = _rot")
 
         emit("_joints.append(_con)")
         emit()
@@ -580,6 +571,395 @@ def generate_blender_script(
             emit_kinematic_rotation(emit, f"_units[{uid}]", pivot_bl, axis_bl, angle_per_frame)
             emit("_kin_obj.rigid_body.kinematic = True")
             emit()
+
+    # ------------------------------------------------------------------
+    # Armature-based IK linkage solver
+    # ------------------------------------------------------------------
+    # All linkage + output units form closed kinematic loops.  Blender's
+    # physics solver cannot handle these (cranks stall).  Instead:
+    # 1. Output cranks get kinematic rotation drivers (like gears).
+    # 2. BFS from ground pivots (anchors) through linkage units to crank
+    #    joints (driven points) produces IK chains.
+    # 3. One armature bone per unit on each chain.  IK targets are Empties
+    #    parented to the crank mesh (move with motor).
+    # 4. Remaining units form closure chains between solved positions.
+    # 5. Meshes parented to bones — no frame_change handler needed.
+    if linkage_units and output_units and drive_tree and scene.motors:
+        motor_speed = scene.motors[0].speed
+
+        # --- Crank rotation (same as gear drivers) ---
+        emit("# ── Kinematic output crank animation ──────────────────────────")
+        emit()
+        for uid in sorted(output_units):
+            node = unit_to_node.get(uid)
+            hinge = unit_hinge.get(uid)
+            if node is None or hinge is None:
+                continue
+            crank_speed = motor_speed * node.accumulated_ratio
+            angle_per_frame = crank_speed / fps
+            pivot_bl = _ldraw_to_blender(hinge.position)
+            axis_bl = _ldraw_to_blender(hinge.axis)
+            ax_norm = float(np.linalg.norm(axis_bl))
+            if ax_norm > 1e-12:
+                axis_bl = axis_bl / ax_norm
+            emit(f"# Output crank unit {uid}: speed={crank_speed:.4f} rad/s")
+            emit_kinematic_rotation(
+                emit, f"_units[{uid}]", pivot_bl, axis_bl, angle_per_frame
+            )
+            emit("_kin_obj.rigid_body.kinematic = True")
+            emit()
+
+        # --- Build joint position lookup ---
+        from collections import defaultdict, deque
+
+        # (uid_a, uid_b) → Blender-space joint position
+        _joint_pos: dict[tuple, np.ndarray] = {}
+        for j in scene.joints:
+            if j.joint_type != JointType.REVOLUTE:
+                continue
+            pos = _ldraw_to_blender(j.position)
+            _joint_pos[(j.unit_a_index, j.unit_b_index)] = pos
+            _joint_pos[(j.unit_b_index, j.unit_a_index)] = pos
+
+        def jpos(ua: int, ub: int) -> np.ndarray:
+            return _joint_pos.get((ua, ub), np.zeros(3))
+
+        # --- Identify anchors and driven points ---
+        anchors: dict[int, np.ndarray] = {}  # linkage_uid → ground pivot pos
+        for j in scene.joints:
+            if j.joint_type != JointType.REVOLUTE:
+                continue
+            if j.unit_a_index == chassis_unit and j.unit_b_index in linkage_units:
+                anchors.setdefault(j.unit_b_index, _ldraw_to_blender(j.position))
+            elif j.unit_b_index == chassis_unit and j.unit_a_index in linkage_units:
+                anchors.setdefault(j.unit_a_index, _ldraw_to_blender(j.position))
+
+        driven: dict[tuple, np.ndarray] = {}  # (link_uid, crank_uid) → pos
+        for j in scene.joints:
+            if j.joint_type != JointType.REVOLUTE:
+                continue
+            if j.unit_a_index in output_units and j.unit_b_index in linkage_units:
+                driven[(j.unit_b_index, j.unit_a_index)] = _ldraw_to_blender(j.position)
+            elif j.unit_b_index in output_units and j.unit_a_index in linkage_units:
+                driven[(j.unit_a_index, j.unit_b_index)] = _ldraw_to_blender(j.position)
+
+        # --- BFS: primary chains (anchor → driven) ---
+        adj_linkage: dict[int, set] = defaultdict(set)
+        for j in scene.joints:
+            if j.joint_type != JointType.REVOLUTE:
+                continue
+            ua, ub = j.unit_a_index, j.unit_b_index
+            if ua in linkage_units and ub in linkage_units:
+                adj_linkage[ua].add(ub)
+                adj_linkage[ub].add(ua)
+
+        # Each chain: (anchor_uid, crank_uid, path=[linkage units from anchor to driven])
+        primary_chains: list = []
+        primary_units: set = set()
+        for anchor_uid in sorted(anchors.keys()):
+            parent_map: dict[int, int | None] = {anchor_uid: None}
+            queue: deque = deque([anchor_uid])
+            while queue:
+                u = queue.popleft()
+                for nb in adj_linkage[u]:
+                    if nb not in parent_map:
+                        parent_map[nb] = u
+                        queue.append(nb)
+            for (link_uid, crank_uid), _ in sorted(driven.items()):
+                if link_uid in parent_map:
+                    path = []
+                    cur: int | None = link_uid
+                    while cur is not None:
+                        path.append(cur)
+                        cur = parent_map[cur]
+                    path.reverse()
+                    primary_chains.append((anchor_uid, crank_uid, path))
+                    primary_units.update(path)
+
+        # --- Closure chains (remaining units between solved positions) ---
+        remaining_units = linkage_units - primary_units
+        # Iteratively find closure chains, adding solved units each round
+        closure_chains: list = []  # (start_uid, end_uid, path)
+        solved_so_far = set(primary_units)
+
+        while remaining_units:
+            # Build adjacency within current remaining set
+            remaining_adj: dict[int, set] = defaultdict(set)
+            for j in scene.joints:
+                if j.joint_type != JointType.REVOLUTE:
+                    continue
+                ua, ub = j.unit_a_index, j.unit_b_index
+                if ua in remaining_units and ub in remaining_units:
+                    remaining_adj[ua].add(ub)
+                    remaining_adj[ub].add(ua)
+
+            # Find which remaining units touch a solved unit
+            remaining_anchors: dict[int, int] = {}
+            for j in scene.joints:
+                if j.joint_type != JointType.REVOLUTE:
+                    continue
+                ua, ub = j.unit_a_index, j.unit_b_index
+                if ua in remaining_units and ub in solved_so_far:
+                    remaining_anchors.setdefault(ua, ub)
+                elif ub in remaining_units and ua in solved_so_far:
+                    remaining_anchors.setdefault(ub, ua)
+
+            if not remaining_anchors:
+                break  # no more solvable units
+
+            # BFS from each anchor, find shortest path to another anchor
+            found_chain = False
+            for start_uid in sorted(remaining_anchors.keys()):
+                if start_uid not in remaining_units:
+                    continue
+                parent_map: dict[int, int | None] = {start_uid: None}
+                queue = deque([start_uid])
+                while queue:
+                    u = queue.popleft()
+                    for nb in remaining_adj[u]:
+                        if nb not in parent_map:
+                            parent_map[nb] = u
+                            queue.append(nb)
+                # Find shortest path to another remaining-anchor
+                for end_uid in sorted(parent_map.keys()):
+                    if end_uid == start_uid:
+                        continue
+                    if end_uid in remaining_anchors:
+                        path = []
+                        cur: int | None = end_uid
+                        while cur is not None:
+                            path.append(cur)
+                            cur = parent_map[cur]
+                        path.reverse()
+                        closure_chains.append((
+                            remaining_anchors[start_uid],
+                            remaining_anchors[end_uid],
+                            path
+                        ))
+                        # Mark these as solved
+                        solved_so_far.update(path)
+                        remaining_units -= set(path)
+                        found_chain = True
+                        break
+                if found_chain:
+                    break
+
+            if not found_chain:
+                break  # no more chains possible
+
+        # Determine common hinge axis (all linkage joints parallel)
+        common_axis = np.array([0.0, -1.0, 0.0])
+        for j in scene.joints:
+            if j.joint_type != JointType.REVOLUTE:
+                continue
+            if j.unit_a_index == chassis_unit or j.unit_b_index == chassis_unit:
+                ax = _ldraw_to_blender(j.axis)
+                ax_n = float(np.linalg.norm(ax))
+                if ax_n > 1e-12:
+                    common_axis = ax / ax_n
+                    break
+
+        # --- Emit IK target empties (parented to cranks) ---
+        emit("# ── IK targets (Empties parented to cranks) ──────────────────")
+        emit()
+        ik_targets: dict[int, str] = {}  # chain_idx → target_name
+        for chain_idx, (anchor_uid, crank_uid, path) in enumerate(primary_chains):
+            tip_uid = path[-1]
+            target_pos = jpos(tip_uid, crank_uid)
+            target_name = f"ik_target_{chain_idx}"
+            ik_targets[chain_idx] = target_name
+            emit(f"# IK target {chain_idx}: crank {crank_uid}, "
+                 f"chain [{' → '.join(str(u) for u in path)}]")
+            emit(f"bpy.ops.object.empty_add(type='PLAIN_AXES', "
+                 f"location=({target_pos[0]:.6f}, "
+                 f"{target_pos[1]:.6f}, {target_pos[2]:.6f}))")
+            emit(f"_tgt = bpy.context.active_object")
+            emit(f"_tgt.name = '{target_name}'")
+            emit(f"_tgt.empty_display_size = 0.003")
+            emit(f"_tgt.parent = _units[{crank_uid}]")
+            emit(f"_tgt.matrix_parent_inverse = "
+                 f"_units[{crank_uid}].matrix_world.inverted()")
+            emit()
+
+        # Closure chain targets: Empties at the tip position on the solved bone
+        closure_targets: dict[int, str] = {}
+        for ci, (solved_anchor, solved_target, path) in enumerate(closure_chains):
+            tip_uid = path[-1]
+            target_pos = jpos(tip_uid, solved_target)
+            target_name = f"ik_closure_target_{ci}"
+            closure_targets[ci] = target_name
+            emit(f"# Closure target {ci}: path [{' → '.join(str(u) for u in path)}]")
+            emit(f"bpy.ops.object.empty_add(type='PLAIN_AXES', "
+                 f"location=({target_pos[0]:.6f}, "
+                 f"{target_pos[1]:.6f}, {target_pos[2]:.6f}))")
+            emit(f"_tgt = bpy.context.active_object")
+            emit(f"_tgt.name = '{target_name}'")
+            emit(f"_tgt.empty_display_size = 0.003")
+            # Parent to the solved unit's bone (will be set after armature)
+            emit(f"_tgt.parent = _units[{solved_target}]")
+            emit(f"_tgt.matrix_parent_inverse = "
+                 f"_units[{solved_target}].matrix_world.inverted()")
+            emit()
+
+        # --- Create armature ---
+        emit("# ── Linkage armature ────────────────────────────────────────────")
+        emit("bpy.ops.object.armature_add(enter_editmode=True, location=(0,0,0))")
+        emit("_arm_obj = bpy.context.active_object")
+        emit("_arm_obj.name = 'LinkageArmature'")
+        emit("_arm = _arm_obj.data")
+        emit("_arm.name = 'LinkageArmData'")
+        emit("_arm.edit_bones.remove(_arm.edit_bones[0])")
+        emit()
+
+        # --- Create bones for primary chains ---
+        # Each bone spans from one joint to the next along the path.
+        # bone[i]: head = joint(path[i-1], path[i]), tail = joint(path[i], path[i+1])
+        # First bone: head = anchor_pos, tail = joint(path[0], path[1])
+        # Last bone: head = joint(path[-2], path[-1]), tail = driven_pos
+        bone_names: dict[tuple, str] = {}  # (chain_idx, unit_idx) → bone_name
+        unit_bone: dict[int, str] = {}  # uid → primary bone_name
+
+        for chain_idx, (anchor_uid, crank_uid, path) in enumerate(primary_chains):
+            anchor_pos = anchors[anchor_uid]
+            driven_pos = jpos(path[-1], crank_uid)
+
+            for i, uid in enumerate(path):
+                bone_name = f"chain{chain_idx}_u{uid}"
+                bone_names[(chain_idx, uid)] = bone_name
+                if uid not in unit_bone:
+                    unit_bone[uid] = bone_name
+
+                # Compute head and tail
+                if i == 0:
+                    head = anchor_pos
+                else:
+                    head = jpos(path[i - 1], path[i])
+
+                if i == len(path) - 1:
+                    tail = driven_pos
+                else:
+                    tail = jpos(path[i], path[i + 1])
+
+                # Check for zero-length bone
+                bone_len = float(np.linalg.norm(tail - head))
+                if bone_len < 1e-6:
+                    # Offset tail slightly along common axis
+                    tail = head + common_axis * 0.001
+
+                emit(f"_b = _arm.edit_bones.new('{bone_name}')")
+                emit(f"_b.head = ({head[0]:.6f}, {head[1]:.6f}, {head[2]:.6f})")
+                emit(f"_b.tail = ({tail[0]:.6f}, {tail[1]:.6f}, {tail[2]:.6f})")
+                if i > 0:
+                    parent_bone = bone_names[(chain_idx, path[i - 1])]
+                    emit(f"_b.parent = _arm.edit_bones['{parent_bone}']")
+                    emit(f"_b.use_connect = True")
+                emit()
+
+        # --- Create bones for closure chains ---
+        closure_bone_names: dict[tuple, str] = {}
+        for ci, (solved_anchor, solved_target, path) in enumerate(closure_chains):
+            anchor_pos = jpos(path[0], solved_anchor)
+            target_pos = jpos(path[-1], solved_target)
+
+            for i, uid in enumerate(path):
+                bone_name = f"closure{ci}_u{uid}"
+                closure_bone_names[(ci, uid)] = bone_name
+                if uid not in unit_bone:
+                    unit_bone[uid] = bone_name
+
+                if i == 0:
+                    head = anchor_pos
+                else:
+                    head = jpos(path[i - 1], path[i])
+
+                if i == len(path) - 1:
+                    tail = target_pos
+                else:
+                    tail = jpos(path[i], path[i + 1])
+
+                bone_len = float(np.linalg.norm(tail - head))
+                if bone_len < 1e-6:
+                    tail = head + common_axis * 0.001
+
+                emit(f"_b = _arm.edit_bones.new('{bone_name}')")
+                emit(f"_b.head = ({head[0]:.6f}, {head[1]:.6f}, {head[2]:.6f})")
+                emit(f"_b.tail = ({tail[0]:.6f}, {tail[1]:.6f}, {tail[2]:.6f})")
+                if i > 0:
+                    parent_bone = closure_bone_names[(ci, path[i - 1])]
+                    emit(f"_b.parent = _arm.edit_bones['{parent_bone}']")
+                    emit(f"_b.use_connect = True")
+                elif solved_anchor in unit_bone:
+                    # Parent root bone to the anchor's bone so it follows motion
+                    emit(f"_b.parent = _arm.edit_bones['{unit_bone[solved_anchor]}']")
+                    emit(f"_b.use_connect = False")
+                emit()
+
+        # --- Switch to pose mode and add IK constraints ---
+        emit("# Switch to pose mode for constraints")
+        emit("bpy.ops.object.mode_set(mode='OBJECT')")
+        emit("bpy.context.view_layer.objects.active = _arm_obj")
+        emit("bpy.ops.object.mode_set(mode='POSE')")
+        emit()
+
+        # Primary chain IK
+        emit("# ── IK constraints on primary chains ─────────────────────────")
+        for chain_idx, (anchor_uid, crank_uid, path) in enumerate(primary_chains):
+            tip_bone = bone_names[(chain_idx, path[-1])]
+            target_name = ik_targets[chain_idx]
+            chain_count = len(path)
+
+            emit(f"# Chain {chain_idx}: "
+                 f"[{' → '.join(str(u) for u in path)}] → crank {crank_uid}")
+            emit(f"_pb = _arm_obj.pose.bones['{tip_bone}']")
+            emit(f"_ik = _pb.constraints.new('IK')")
+            emit(f"_ik.target = bpy.data.objects['{target_name}']")
+            emit(f"_ik.chain_count = {chain_count}")
+            emit(f"_ik.use_stretch = False")
+            emit()
+
+        # Closure chain IK
+        emit("# ── IK constraints on closure chains ─────────────────────────")
+        for ci, (solved_anchor, solved_target, path) in enumerate(closure_chains):
+            tip_bone = closure_bone_names[(ci, path[-1])]
+            target_name = closure_targets[ci]
+            chain_count = len(path)
+
+            emit(f"# Closure {ci}: "
+                 f"[{' → '.join(str(u) for u in path)}]")
+            emit(f"_pb = _arm_obj.pose.bones['{tip_bone}']")
+            emit(f"_ik = _pb.constraints.new('IK')")
+            emit(f"_ik.target = bpy.data.objects['{target_name}']")
+            emit(f"_ik.chain_count = {chain_count}")
+            emit(f"_ik.use_stretch = False")
+            emit()
+
+        # --- Exit pose mode ---
+        emit("bpy.ops.object.mode_set(mode='OBJECT')")
+        emit()
+
+        # Hide armature from render but keep in viewport
+        emit("_arm_obj.hide_render = True")
+        emit()
+
+        # --- Attach meshes to bones via CHILD_OF constraints ---
+        emit("# ── Attach linkage meshes to armature bones ──────────────────")
+        emit("# Use CHILD_OF constraints (avoids bone-parenting matrix issues).")
+        emit("# The constraint's inverse matrix is set so meshes stay in place at")
+        emit("# frame 0, then follow bone movement as IK solves.")
+        for uid in sorted(linkage_units):
+            if uid not in unit_bone:
+                continue
+            bone_name = unit_bone[uid]
+            emit(f"_con = _units[{uid}].constraints.new('CHILD_OF')")
+            emit(f"_con.target = _arm_obj")
+            emit(f"_con.subtarget = '{bone_name}'")
+            emit(f"_con.inverse_matrix = ("
+                 f"_arm_obj.matrix_world @ "
+                 f"_arm_obj.pose.bones['{bone_name}'].matrix).inverted() @ "
+                 f"_units[{uid}].matrix_world")
+            emit()
+
+        emit()
 
     # ------------------------------------------------------------------
     # Gear mesh collision exclusion
@@ -656,6 +1036,39 @@ def generate_blender_script(
     emit("with bpy.context.temp_override(**override):")
     emit("    bpy.ops.ptcache.bake(bake=True)")
     emit("print('Physics bake complete.')")
+    emit()
+
+    # Post-bake diagnostics: log rotation of output/active units per frame
+    emit("# ── Diagnostics ────────────────────────────────────────────────")
+    emit("import math")
+    emit("print('\\n=== POST-BAKE DIAGNOSTICS ===')")
+    emit(f"print(f'Frames: 1..{sim_frames}')")
+    # Track output units (cranks) and sample linkage units
+    diag_units = list(output_units)[:2]
+    # Add grounded linkage units as diagnostic targets
+    if linkage_units:
+        grounded_diag = sorted(uid for uid in linkage_units
+                               if any(j.unit_a_index == chassis_unit and j.unit_b_index == uid
+                                      or j.unit_b_index == chassis_unit and j.unit_a_index == uid
+                                      for j in scene.joints if j.joint_type == JointType.REVOLUTE))
+        diag_units.extend(grounded_diag[:2])
+    emit(f"_diag_units = {diag_units}")
+    emit("for _du in _diag_units:")
+    emit(f"    print(f'  Unit {{_du}}: {{_units[_du].name}}')")
+    emit("print()")
+    emit("print('frame | ' + ' | '.join(f'unit{u}_rot(deg)' for u in _diag_units))")
+    emit("print('-' * 80)")
+    emit(f"for _f in range(1, {sim_frames} + 1, max(1, {sim_frames} // 12)):")
+    emit("    scene.frame_set(_f)")
+    emit("    _vals = []")
+    emit("    for _du in _diag_units:")
+    emit("        _obj = _units[_du]")
+    emit("        _e = _obj.matrix_world.to_euler()")
+    emit("        _total = math.degrees(math.sqrt(_e.x**2 + _e.y**2 + _e.z**2))")
+    emit("        _vals.append(f'{_total:8.2f}')")
+    emit("    print(f'{_f:5d} | ' + ' | '.join(_vals))")
+    emit("print('=== END DIAGNOSTICS ===\\n')")
+    emit()
 
     if render:
         emit()
