@@ -39,14 +39,39 @@ def _ldraw_to_mujoco(pos: np.ndarray) -> np.ndarray:
 
     LDraw: X right, Y down, Z towards viewer.
     MuJoCo: X right, Y into screen, Z up.
-    Mapping: X→X, Y→-Z, Z→-Y  (same as Blender convention used elsewhere)
-    Then MuJoCo uses Z-up by default so we swap Y/Z:
-    Final: X→X, Y→Y (into screen), Z→Z (up)
-    Actually let's just use: X=X, Z=-Y(ldraw), Y=Z(ldraw)
     """
     # LDraw Y is down → MuJoCo Z is up → Z_mj = -Y_ld
     # LDraw Z is towards viewer → MuJoCo Y is into screen → Y_mj = -Z_ld
     return np.array([pos[0], -pos[2], -pos[1]])
+
+
+def _write_stl(path: Path, vertices: np.ndarray, faces: np.ndarray) -> None:
+    """Write a binary STL file from vertices and face indices."""
+    import struct
+
+    n_faces = len(faces)
+    with open(path, 'wb') as f:
+        # 80-byte header
+        f.write(b'\x00' * 80)
+        # Number of triangles
+        f.write(struct.pack('<I', n_faces))
+        for face in faces:
+            v0 = vertices[face[0]]
+            v1 = vertices[face[1]]
+            v2 = vertices[face[2]]
+            # Normal (cross product)
+            edge1 = v1 - v0
+            edge2 = v2 - v0
+            normal = np.cross(edge1, edge2)
+            norm_len = np.linalg.norm(normal)
+            if norm_len > 0:
+                normal = normal / norm_len
+            # Write: normal, v0, v1, v2, attribute byte count
+            f.write(struct.pack('<3f', *normal))
+            f.write(struct.pack('<3f', *v0))
+            f.write(struct.pack('<3f', *v1))
+            f.write(struct.pack('<3f', *v2))
+            f.write(struct.pack('<H', 0))
 
 
 def _vec_str(v: np.ndarray) -> str:
@@ -65,6 +90,7 @@ def generate_mjcf(
     *,
     timestep: float = 0.001,
     motor_speed: Optional[float] = None,
+    mesh_dir: Optional[Path] = None,
 ) -> str:
     """Generate MJCF XML string from a PhysicsScene.
 
@@ -76,6 +102,9 @@ def generate_mjcf(
         Simulation timestep in seconds.
     motor_speed : float, optional
         Override motor target speed (rad/s). If None, uses scene motor speed.
+    mesh_dir : Path, optional
+        Directory to write STL mesh files for each unit. If provided,
+        uses actual mesh geometry instead of box approximations.
 
     Returns
     -------
@@ -115,12 +144,59 @@ def generate_mjcf(
     # Joints not in spanning tree → equality constraints (loop closures)
     loop_joints = [ji for ji in range(len(joints)) if ji not in tree_joints]
 
+    # --- Write mesh files and compute per-unit geometry ---
+    use_mesh = mesh_dir is not None
+    unit_mesh_files: dict[int, str] = {}  # uid → STL filename
+    unit_half_ext: dict[int, np.ndarray] = {}  # uid → box half-extents (fallback)
+
+    for uid, unit in enumerate(units):
+        all_verts = []
+        all_faces = []
+        vert_offset = 0
+        for brick in unit.bricks:
+            for tri in brick.triangles:
+                v0 = np.array(tri.v0) * LDU_TO_METERS
+                v1 = np.array(tri.v1) * LDU_TO_METERS
+                v2 = np.array(tri.v2) * LDU_TO_METERS
+                # Convert to MuJoCo coords (X, -Z, -Y)
+                all_verts.append([v0[0], -v0[2], -v0[1]])
+                all_verts.append([v1[0], -v1[2], -v1[1]])
+                all_verts.append([v2[0], -v2[2], -v2[1]])
+                all_faces.append([vert_offset, vert_offset + 1, vert_offset + 2])
+                vert_offset += 3
+
+        if not all_verts:
+            unit_half_ext[uid] = np.array([0.005, 0.005, 0.005])
+            continue
+
+        verts = np.array(all_verts)
+        # Shift to body-local frame (relative to CoM)
+        com_mj = _ldraw_to_mujoco(unit.center_of_mass)
+        verts_local = verts - com_mj
+
+        half_ext = (verts_local.max(axis=0) - verts_local.min(axis=0)) / 2.0
+        half_ext = np.maximum(half_ext, 0.001)
+        unit_half_ext[uid] = half_ext
+
+        if use_mesh:
+            # Write binary STL
+            faces = np.array(all_faces)
+            stl_name = f"unit_{uid}.stl"
+            unit_mesh_files[uid] = stl_name
+            _write_stl(mesh_dir / stl_name, verts_local, faces)
+
     # --- Build MJCF XML ---
     mujoco_el = Element("mujoco", model="lego_technic")
 
     # Compiler settings
-    SubElement(mujoco_el, "compiler", angle="radian", autolimits="true",
-               balanceinertia="true")
+    compiler_attrs = {
+        "angle": "radian",
+        "autolimits": "true",
+        "balanceinertia": "true",
+    }
+    if use_mesh:
+        compiler_attrs["meshdir"] = str(mesh_dir)
+    SubElement(mujoco_el, "compiler", **compiler_attrs)
 
     # Options
     SubElement(mujoco_el, "option", timestep=str(timestep), gravity="0 0 -9.81",
@@ -129,8 +205,15 @@ def generate_mjcf(
     # Default settings for joints and geoms
     default_el = SubElement(mujoco_el, "default")
     SubElement(default_el, "joint", damping="0.01", armature="0.001")
-    SubElement(default_el, "geom", type="box", rgba="0.8 0.2 0.2 1",
+    SubElement(default_el, "geom", rgba="0.8 0.2 0.2 1",
                condim="4", friction="1.0 0.005 0.0001")
+
+    # Mesh assets
+    if use_mesh and unit_mesh_files:
+        asset_el = SubElement(mujoco_el, "asset")
+        for uid in sorted(unit_mesh_files.keys()):
+            SubElement(asset_el, "mesh", name=f"mesh_{uid}",
+                       file=unit_mesh_files[uid])
 
     # --- Worldbody ---
     worldbody = SubElement(mujoco_el, "worldbody")
@@ -148,25 +231,6 @@ def generate_mjcf(
     # Joint names for referencing in actuators/equality
     joint_names: dict[int, str] = {}  # joint_index → name
 
-    def _estimate_box_size(unit: Unit) -> np.ndarray:
-        """Estimate a bounding-box half-extents from unit bricks."""
-        all_verts = []
-        for brick in unit.bricks:
-            for tri in brick.triangles:
-                for v in [tri.v0, tri.v1, tri.v2]:
-                    all_verts.append(v * LDU_TO_METERS)
-        if not all_verts:
-            return np.array([0.005, 0.005, 0.005])
-        verts = np.array(all_verts)
-        # Convert to MuJoCo coords
-        verts_mj = np.column_stack([
-            verts[:, 0], -verts[:, 2], -verts[:, 1]
-        ])
-        half_ext = (verts_mj.max(axis=0) - verts_mj.min(axis=0)) / 2.0
-        # Minimum size
-        half_ext = np.maximum(half_ext, 0.001)
-        return half_ext
-
     def _build_body(uid: int, parent_el: Element, parent_com_mj: np.ndarray):
         """Recursively build body XML for unit and its tree-children."""
         unit = units[uid]
@@ -179,7 +243,7 @@ def generate_mjcf(
 
         # Inertial properties
         mass = max(unit.mass, 0.001)
-        half_ext = _estimate_box_size(unit)
+        half_ext = unit_half_ext.get(uid, np.array([0.005, 0.005, 0.005]))
         # Use box inertia: I = m/12 * (b² + c²) etc.
         Ix = mass / 12.0 * (half_ext[1]**2 + half_ext[2]**2)
         Iy = mass / 12.0 * (half_ext[0]**2 + half_ext[2]**2)
@@ -212,16 +276,18 @@ def generate_mjcf(
                 SubElement(body_el, "joint", name=jname, type="hinge",
                            pos=_vec_str(jpos_mj), axis=_vec_str(jaxis_mj))
             elif j.joint_type == JointType.FIXED:
-                # Fixed joints → weld (no DOF)
                 pass  # MuJoCo: just attach rigidly (no joint element)
             elif j.joint_type == JointType.SLIDER:
                 SubElement(body_el, "joint", name=jname, type="slide",
                            pos=_vec_str(jpos_mj), axis=_vec_str(jaxis_mj))
 
-        # Visual/collision geom (box approximation)
-        SubElement(body_el, "geom", name=f"geom_{uid}", type="box",
-                   size=_vec_str(half_ext),
-                   rgba=_unit_color(uid))
+        # Visual/collision geom
+        if use_mesh and uid in unit_mesh_files:
+            SubElement(body_el, "geom", name=f"geom_{uid}", type="mesh",
+                       mesh=f"mesh_{uid}", rgba=_unit_color(uid))
+        else:
+            SubElement(body_el, "geom", name=f"geom_{uid}", type="box",
+                       size=_vec_str(half_ext), rgba=_unit_color(uid))
 
         # Recurse into tree children
         for child_uid in range(len(units)):
@@ -247,14 +313,18 @@ def generate_mjcf(
     SubElement(chassis_body, "freejoint", name="chassis_free")
 
     mass = max(chassis.mass, 0.001)
-    half_ext = _estimate_box_size(chassis)
+    half_ext = unit_half_ext.get(chassis_unit, np.array([0.005, 0.005, 0.005]))
     Ix = max(mass / 12.0 * (half_ext[1]**2 + half_ext[2]**2), 1e-8)
     Iy = max(mass / 12.0 * (half_ext[0]**2 + half_ext[2]**2), 1e-8)
     Iz = max(mass / 12.0 * (half_ext[0]**2 + half_ext[1]**2), 1e-8)
     SubElement(chassis_body, "inertial", mass=f"{mass:.6f}", pos="0 0 0",
                diaginertia=f"{Ix:.8f} {Iy:.8f} {Iz:.8f}")
-    SubElement(chassis_body, "geom", name="geom_0", type="box",
-               size=_vec_str(half_ext), rgba=_unit_color(chassis_unit))
+    if use_mesh and chassis_unit in unit_mesh_files:
+        SubElement(chassis_body, "geom", name="geom_0", type="mesh",
+                   mesh=f"mesh_{chassis_unit}", rgba=_unit_color(chassis_unit))
+    else:
+        SubElement(chassis_body, "geom", name="geom_0", type="box",
+                   size=_vec_str(half_ext), rgba=_unit_color(chassis_unit))
 
     # Build children of chassis
     for child_uid in range(len(units)):

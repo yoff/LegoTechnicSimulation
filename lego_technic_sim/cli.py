@@ -194,10 +194,15 @@ def main(argv: list[str] | None = None) -> None:
     if args.mujoco:
         from lego_technic_sim.mujoco_export import generate_mjcf, simulate_mjcf
 
-        mjcf_xml = generate_mjcf(scene)
         output_path = args.output_script
+        # Create mesh directory alongside the XML
+        mesh_dir = output_path.parent / (output_path.stem + "_meshes")
+        mesh_dir.mkdir(parents=True, exist_ok=True)
+
+        mjcf_xml = generate_mjcf(scene, mesh_dir=mesh_dir)
         output_path.write_text(mjcf_xml)
         print(f"MuJoCo MJCF written to {output_path}")
+        print(f"Mesh files written to {mesh_dir}/")
 
         # Run simulation if duration specified
         if args.mujoco_duration > 0:
