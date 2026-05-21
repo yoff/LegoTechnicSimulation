@@ -154,6 +154,22 @@ def _build_parser() -> argparse.ArgumentParser:
             "Uses Cycles engine for headless compatibility."
         ),
     )
+    p.add_argument(
+        "--mujoco",
+        action="store_true",
+        help=(
+            "Export a MuJoCo MJCF XML file instead of a Blender script. "
+            "MuJoCo supports closed kinematic loops natively, enabling "
+            "physics-based walking simulation."
+        ),
+    )
+    p.add_argument(
+        "--mujoco-duration",
+        type=float,
+        default=5.0,
+        metavar="SECS",
+        help="Duration of MuJoCo simulation in seconds (default: 5.0).",
+    )
     return p
 
 
@@ -175,7 +191,38 @@ def main(argv: list[str] | None = None) -> None:
     model_path = args.input_model.resolve()
     ldraw_library = ldraw_lib.resolve() if ldraw_lib else None
 
-    if args.drivetrain:
+    if args.mujoco:
+        from lego_technic_sim.mujoco_export import generate_mjcf, simulate_mjcf
+
+        mjcf_xml = generate_mjcf(scene)
+        output_path = args.output_script
+        output_path.write_text(mjcf_xml)
+        print(f"MuJoCo MJCF written to {output_path}")
+
+        # Run simulation if duration specified
+        if args.mujoco_duration > 0:
+            motor_ctrl = None
+            if scene.motors:
+                motor_ctrl = scene.motors[0].speed
+            print(f"Simulating {args.mujoco_duration}s...")
+            frames = simulate_mjcf(
+                mjcf_xml,
+                duration=args.mujoco_duration,
+                motor_ctrl=motor_ctrl,
+            )
+            print(f"Simulation complete: {len(frames)} frames recorded")
+            # Save trajectory as numpy archive
+            traj_path = output_path.with_suffix(".npz")
+            import numpy as np_save
+            frame_data = {}
+            for fi, frame in enumerate(frames):
+                for body_name, pos in frame.items():
+                    key = f"{body_name}__{fi}"
+                    frame_data[key] = pos
+            np_save.savez(traj_path, n_frames=len(frames), **frame_data)
+            print(f"Trajectory saved to {traj_path}")
+
+    elif args.drivetrain:
         from lego_technic_sim.physics.drive_train import build_drive_train
         from lego_technic_sim.blender.drivetrain_animation import (
             generate_drivetrain_animation,

@@ -263,17 +263,17 @@ def generate_blender_script(
     else:
         gear_unit_set = set()
 
-    # Chassis/motor units are always PASSIVE static
+    # Chassis/motor units
     _motor_unit_indices = set()
-    if anchor_motor:
-        for motor in scene.motors:
-            joint = scene.joints[motor.joint_index]
-            _motor_unit_indices.add(joint.unit_a_index)
-    # Always anchor the motor body in kinematic mode
     if scene.motors:
         motor_joint = scene.joints[scene.motors[0].joint_index]
         chassis_unit = motor_joint.unit_a_index
-    _motor_unit_indices.add(chassis_unit)
+    if anchor_motor:
+        # Pin the chassis (and motor body) as PASSIVE kinematic
+        _motor_unit_indices.add(chassis_unit)
+        for motor in scene.motors:
+            joint = scene.joints[motor.joint_index]
+            _motor_unit_indices.add(joint.unit_a_index)
 
     # Find hinge joints for kinematic gear units (for driver animation)
     # and for output units (for torque-limited MOTOR constraints)
@@ -300,7 +300,10 @@ def generate_blender_script(
             adj[j.unit_b_index].add(j.unit_a_index)
 
     # Seed: chassis + kinematic gears + output cranks
+    # (chassis is always in kinematic_zone for closure detection, even when
+    # it is ACTIVE for physics — its position anchors the linkage graph)
     kinematic_zone = _motor_unit_indices | kinematic_units | output_units
+    kinematic_zone.add(chassis_unit)
 
     # Kinematic closure: a non-kinematic unit is part of a closed loop if
     # it lies on a path between two kinematic-zone units (through other
@@ -331,8 +334,9 @@ def generate_blender_script(
         if len(kin_neighbors) >= 2:
             kinematic_zone |= component
 
-    # Units added by closure (not gears/motor/output)
+    # Units added by closure (not gears/motor/output/chassis)
     linkage_units = kinematic_zone - _motor_unit_indices - kinematic_units - output_units
+    linkage_units.discard(chassis_unit)
 
     # Find hinge pivots for linkage units too
     for j in scene.joints:
@@ -407,7 +411,10 @@ def generate_blender_script(
         mass = max(unit.mass, 0.001)
         emit(f"_obj.rigid_body.mass = {mass:.6f}")
         # Kinematic units: motor body, gears, output cranks, and linkage units
-        if idx in kinematic_zone:
+        # Chassis is ACTIVE when not anchored (free to move under physics)
+        if idx == chassis_unit and not anchor_motor:
+            emit("_obj.rigid_body.type = 'ACTIVE'")
+        elif idx in kinematic_zone:
             emit("_obj.rigid_body.type = 'PASSIVE'")
             emit("_obj.rigid_body.kinematic = True")
         else:
@@ -420,7 +427,16 @@ def generate_blender_script(
         emit("_obj.rigid_body.restitution = 0.0")
         emit("_obj.rigid_body.linear_damping = 0.04")
         emit("_obj.rigid_body.angular_damping = 0.1")
-        if collision_mode == "none":
+        if not anchor_motor:
+            # Separate collision layers: chassis+ground in collection 0,
+            # kinematic units in collection 1 (so legs don't push chassis)
+            if idx == chassis_unit:
+                emit("_obj.rigid_body.collision_collections[0] = True")
+                emit("_obj.rigid_body.collision_collections[1] = False")
+            else:
+                emit("_obj.rigid_body.collision_collections[0] = False")
+                emit("_obj.rigid_body.collision_collections[1] = True")
+        elif collision_mode == "none":
             # Put units in collision collection 1 (not 0) so they only
             # collide with objects in collection 1 (i.e. the ground).
             emit("_obj.rigid_body.collision_collections[0] = False")
@@ -465,7 +481,11 @@ def generate_blender_script(
     emit("_ground.rigid_body.type = 'PASSIVE'")
     emit("_ground.rigid_body.collision_shape = 'BOX'")
     emit("_ground.rigid_body.friction = 0.8")
-    if collision_mode == "none":
+    if not anchor_motor:
+        # Ground in collection 0 only — collides with chassis, not legs
+        emit("_ground.rigid_body.collision_collections[0] = True")
+        emit("_ground.rigid_body.collision_collections[1] = False")
+    elif collision_mode == "none":
         # Ground must be in collection 1 to collide with units
         emit("_ground.rigid_body.collision_collections[1] = True")
     if render:
@@ -940,6 +960,22 @@ def generate_blender_script(
         # Hide armature from render but keep in viewport
         emit("_arm_obj.hide_render = True")
         emit()
+
+        # --- Parent armature and kinematic units to chassis when free ---
+        if not anchor_motor:
+            emit("# ── Parent armature & kinematic units to chassis ────────────")
+            emit("# When chassis is ACTIVE (free), the armature and gear/crank")
+            emit("# objects must follow it so the IK linkage stays attached.")
+            emit(f"_arm_obj.parent = _units[{chassis_unit}]")
+            emit(f"_arm_obj.matrix_parent_inverse = "
+                 f"_units[{chassis_unit}].matrix_world.inverted()")
+            emit()
+            # Parent gear and crank units to chassis
+            for uid in sorted(kinematic_units | output_units):
+                emit(f"_units[{uid}].parent = _units[{chassis_unit}]")
+                emit(f"_units[{uid}].matrix_parent_inverse = "
+                     f"_units[{chassis_unit}].matrix_world.inverted()")
+            emit()
 
         # --- Attach meshes to bones via CHILD_OF constraints ---
         emit("# ── Attach linkage meshes to armature bones ──────────────────")
