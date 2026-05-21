@@ -5,8 +5,12 @@ Physical simulation of Lego Technic builds.
 ## What this repository does
 
 This project parses LDraw (`.ldr`) models of Lego Technic builds, analyses
-their mechanical structure, and generates Blender Python scripts for
-visualisation and rigid-body physics simulation.
+their mechanical structure, and generates animations via two backends:
+
+- **Blender** – high-quality rendered animations using armature IK for
+  kinematic linkages and driver expressions for gear trains.
+- **MuJoCo** – physics-based simulation with closed kinematic loop support,
+  enabling walking robots to move under motor power.
 
 The pipeline:
 
@@ -21,24 +25,24 @@ The pipeline:
 5. **Detect gear meshes** – finds parallel and bevel gear pairs at correct
    centre distances and computes gear ratios.
 6. **Build drive train** – traces the gear chain from the motor outward via BFS.
-7. **Generate Blender script** – outputs a self-contained Python script that
-   recreates the model in Blender with rigid-body physics, motor constraints,
-   ground plane, camera, and lighting.
+7. **Generate output** – either a Blender Python script or MuJoCo MJCF XML.
 
 ### Output modes
 
 | Flag | Description |
 |------|-------------|
-| *(default)* | Static scene with rigid bodies and constraints |
+| *(default)* | Static Blender scene with rigid bodies and constraints |
 | `--assembly` | Units appear one by one in an animated assembly sequence |
 | `--drivetrain` | Gears spin in sequence from motor outward |
-| `--simulate` | Full rigid-body physics simulation with gravity |
+| `--simulate` | Kinematic linkage animation (IK armature) with gear drivers |
+| `--mujoco` | MuJoCo MJCF export with physics simulation |
 
 ## Prerequisites
 
 - Python 3.10+
 - An LDraw parts library on disk (auto-detected or specified via `--ldraw-library`)
 - [Blender](https://www.blender.org/) 4.1+ for running the generated scripts
+- [MuJoCo](https://mujoco.org/) (`pip install mujoco`) for physics simulation
 
 ## Quick start
 
@@ -66,36 +70,36 @@ curl -L https://yoff.github.io/lego-walker/Walker1/Walker1.ldr \
 
 ## Usage
 
-### Basic analysis (static scene)
+### Kinematic simulation (Blender)
 
-```bash
-lego-technic-sim sample_models/Walker1/Walker1.ldr \
-                 /tmp/walker1.py \
-                 --ldraw-library /opt/ldraw/ldraw
-```
-
-Output:
-
-```
-Parsed 42 parts
-Built 49 rigid units
-Detected 63 joints
-Detected 5 gear meshes
-Detected 1 motors
-Blender script written to /tmp/walker1.py
-```
-
-### Physics simulation
+The `--simulate` mode uses armature IK to animate closed kinematic linkages
+(4-bar mechanisms, walking legs) with precise gear-driven crank rotation:
 
 ```bash
 lego-technic-sim sample_models/Walker1/Walker1.ldr \
                  /tmp/walker1_sim.py \
-                 --simulate --sim-frames 120
+                 --simulate --anchor-motor --fast
+blender --background --python /tmp/walker1_sim.py
 ```
 
-Add `--anchor-motor` to fix the motor in space (useful for drive-train
-testing), `--follow-motor` to track the camera on the motor unit, or
-`--follow-unit 3` to follow a specific unit.
+Add `--anchor-motor` to pin the chassis (shows leg motion clearly), or omit it
+for a free chassis that rests on the ground plane.
+
+### Physics simulation (MuJoCo)
+
+The `--mujoco` mode exports an MJCF XML with real mesh geometry. MuJoCo solves
+closed kinematic loops via equality constraints, enabling physics-driven
+walking:
+
+```bash
+lego-technic-sim sample_models/Walker1/Walker1.ldr \
+                 /tmp/walker1.xml \
+                 --mujoco --mujoco-duration 5
+```
+
+This writes the MJCF XML plus per-unit STL mesh files, then runs a simulation
+and records the trajectory. Render with MuJoCo's viewer or the offscreen
+renderer.
 
 ### Assembly animation
 
@@ -115,7 +119,7 @@ lego-technic-sim sample_models/Walker1/Walker1.ldr \
 
 ### Fast rendering
 
-Add `--fast` to any mode for quick preview renders (480×270, 4 Cycles
+Add `--fast` to any Blender mode for quick preview renders (480×270, 4 Cycles
 samples):
 
 ```bash
@@ -154,17 +158,50 @@ sudo apt-get install -y libxxf86vm1 libxfixes3 libxi6 libxrender1 \
 | Argument | Description |
 |----------|-------------|
 | `input_model` | Path to the `.ldr` model file |
-| `output_script` | Destination for the Blender Python script |
+| `output_script` | Destination for Blender script or MJCF XML |
 | `--ldraw-library PATH` | LDraw parts library root (auto-detected if omitted) |
 | `--assembly` | Generate assembly animation |
 | `--frames-per-unit N` | Frames between units in assembly mode (default: 10) |
 | `--drivetrain` | Generate drive train animation |
-| `--simulate` | Generate physics simulation |
+| `--simulate` | Generate kinematic simulation (Blender IK) |
 | `--sim-frames N` | Simulation length in frames (default: 120) |
 | `--follow-unit IDX` | Camera follows the specified unit |
 | `--follow-motor [IDX]` | Camera follows a motor's unit (default: first motor) |
-| `--anchor-motor` | Fix motor units in space (passive rigid body) |
+| `--anchor-motor` | Fix chassis in space (useful for observing leg motion) |
+| `--collision MODE` | Collision shape: `convex_hull`, `mesh`, or `none` |
+| `--mujoco` | Export MuJoCo MJCF XML with mesh geometry |
+| `--mujoco-duration SECS` | MuJoCo simulation duration (default: 5.0) |
 | `--fast` | Low-resolution fast preview (480×270, 4 samples) |
+
+## How the kinematic solver works
+
+For models with closed kinematic loops (e.g. walking mechanisms), Blender's
+Bullet physics engine cannot maintain joint closure. Instead, the simulation
+uses:
+
+1. **Gear/crank drivers** – output cranks rotate via frame-based expressions at
+   exact gear ratios from the motor.
+2. **Primary IK chains** – BFS from ground-pivot anchors to crank-driven points
+   produces bone chains. IK targets (empties parented to cranks) drive the
+   solver.
+3. **Closure chains** – remaining units form secondary chains anchored to
+   already-solved bones.
+4. **CHILD_OF constraints** – meshes follow their bone without needing a
+   frame-change handler.
+
+## How the MuJoCo simulation works
+
+MuJoCo solves what Blender cannot:
+
+1. **Spanning tree** – BFS from chassis builds a tree of bodies connected by
+   hinge joints.
+2. **Equality constraints** – joints that would close a loop become `connect`
+   constraints (point-to-point at the joint position).
+3. **Gear coupling** – gear meshes become `joint` equality constraints with
+   the appropriate ratio.
+4. **Motor actuator** – a velocity servo drives the motor joint.
+5. **Mesh geometry** – each unit's triangles are exported as binary STL for
+   accurate collision and visuals.
 
 ## Setup script
 
@@ -210,10 +247,12 @@ lego_technic_sim/
     mesh_properties.py # Mass, volume, centre-of-mass computation
     model.py           # PhysicsScene, Unit, Joint, Motor dataclasses
   blender/        # Blender script generation
-    exporter.py             # Physics simulation script generator
+    exporter.py             # Kinematic simulation script generator
     assembly_animation.py   # Assembly animation generator
     drivetrain_animation.py # Drive train animation generator
-  cli.py          # Command-line interface
+    geometry.py             # Shared geometry helpers (coordinate conversion, drivers)
+  mujoco_export.py  # MuJoCo MJCF exporter and simulator
+  cli.py            # Command-line interface
 tests/            # Test suite (pytest)
   fixtures/       # Minimal .ldr test models with renders
 sample_models/    # Example Lego Technic models
@@ -225,8 +264,9 @@ sample_models/    # Example Lego Technic models
   sufficient.
 - Port-based connection detection covers standard Technic pins, axles, and
   motor shafts.  Some exotic connectors may not be recognised.
-- Gear mesh constraints are detected but not yet enforced as physics
-  constraints in the Blender simulation (gear ratios are computed but not
-  applied as coupled constraints).
+- The Blender kinematic solver requires that all linkage units form closed loops
+  back to the chassis; open-chain linkages are not animated.
+- MuJoCo simulation uses convex hulls of the mesh geometry for collision, which
+  over-approximates hollow parts.
 - Rendering uses Cycles (CPU) for headless compatibility; EEVEE requires a GPU
   display.
