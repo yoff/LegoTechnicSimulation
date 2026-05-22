@@ -45,6 +45,8 @@ from ..physics.drive_train import build_drive_train
 from .geometry import (
     ldraw_to_blender as _ldraw_to_blender,
     collect_geometry,
+    collect_geometry_colored,
+    parse_ldconfig,
     emit_kinematic_rotation,
 )
 
@@ -129,12 +131,24 @@ def generate_blender_script(
         emit(f"sys.path.insert(0, {pkg_root!r})")
         emit("from lego_technic_sim.ldraw.parser import LDrawParser")
         emit("from lego_technic_sim.physics.unit_builder import build_units_and_joints")
-        emit("from lego_technic_sim.blender.geometry import collect_geometry")
+        emit("from lego_technic_sim.blender.geometry import collect_geometry, collect_geometry_colored")
         emit()
         emit(f"print('Parsing LDraw model...')")
         emit(f"_build = LDrawParser({str(ldraw_library)!r}).parse_build({str(model_path)!r})")
         emit("_scene = build_units_and_joints(_build)")
         emit(f"print(f'Loaded {{len(_scene.units)}} units')")
+        emit()
+
+    # ------------------------------------------------------------------
+    # LDraw color table (parsed at script-generation time)
+    # ------------------------------------------------------------------
+    _ldraw_colors = parse_ldconfig(ldraw_library)
+    if _ldraw_colors:
+        emit("# ── LDraw color table ─────────────────────────────────────────")
+        emit(f"_ldraw_colors = {dict(_ldraw_colors)!r}")
+        emit()
+    else:
+        emit("_ldraw_colors = {}")
         emit()
 
     # ------------------------------------------------------------------
@@ -359,10 +373,29 @@ def generate_blender_script(
         if use_mesh:
             if _runtime_geometry:
                 # Geometry loaded at render time from the parsed model
-                emit(f"_verts, _faces = collect_geometry(_scene.units[{idx}].bricks)")
+                emit(f"_verts, _faces, _face_colors = collect_geometry_colored(_scene.units[{idx}].bricks)")
                 emit("if _verts:")
                 emit(f"    _mesh = bpy.data.meshes.new({safe_name + '_mesh'!r})")
                 emit("    _mesh.from_pydata(_verts, [], _faces)")
+                # Per-face color materials
+                emit("    _color_set = sorted(set(_face_colors))")
+                emit("    _color_to_slot = {}")
+                emit("    for _ci, _cc in enumerate(_color_set):")
+                emit("        _rgb = _ldraw_colors.get(_cc, (0.5, 0.5, 0.5))")
+                emit("        _mat_name = f'ldraw_{_cc}'")
+                emit("        _mat = bpy.data.materials.get(_mat_name)")
+                emit("        if _mat is None:")
+                emit("            _mat = bpy.data.materials.new(name=_mat_name)")
+                emit("            _mat.use_nodes = True")
+                emit("            _bsdf = _mat.node_tree.nodes.get('Principled BSDF')")
+                emit("            if _bsdf:")
+                emit("                _bsdf.inputs['Base Color'].default_value = (_rgb[0], _rgb[1], _rgb[2], 1.0)")
+                emit("                _bsdf.inputs['Roughness'].default_value = 0.3")
+                emit("                _bsdf.inputs['Specular IOR Level'].default_value = 0.5")
+                emit("        _mesh.materials.append(_mat)")
+                emit("        _color_to_slot[_cc] = _ci")
+                emit("    for _fi, _fc in enumerate(_face_colors):")
+                emit("        _mesh.polygons[_fi].material_index = _color_to_slot[_fc]")
                 emit("    _mesh.update()")
                 emit(f"    _obj = bpy.data.objects.new({safe_name!r}, _mesh)")
                 emit("    bpy.context.collection.objects.link(_obj)")
@@ -442,8 +475,8 @@ def generate_blender_script(
             emit("_obj.rigid_body.collision_collections[0] = False")
             emit("_obj.rigid_body.collision_collections[1] = True")
 
-        # Material
-        if render:
+        # Material (fallback for non-runtime or non-mesh paths)
+        if render and not (_runtime_geometry and use_mesh):
             emit(f"_mat = bpy.data.materials.new(name='mat_{idx}')")
             emit("_mat.use_nodes = True")
             emit("_bsdf = _mat.node_tree.nodes.get('Principled BSDF')")
