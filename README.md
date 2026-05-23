@@ -2,6 +2,12 @@
 
 Physical simulation of Lego Technic builds.
 
+<p align="center">
+  <img src="walker1_cycle_side.gif" alt="Walker1 side view" width="150">
+  <img src="walker1_cycle_persp.gif" alt="Walker1 perspective view" width="150">
+  <img src="walker1_cycle_front.gif" alt="Walker1 front view" width="150">
+</p>
+
 ## What this repository does
 
 This project parses LDraw (`.ldr`) models of Lego Technic builds, analyses
