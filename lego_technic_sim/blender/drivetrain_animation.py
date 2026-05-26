@@ -158,18 +158,18 @@ def generate_drivetrain_animation(
     if presentation:
         emit(f"bpy.ops.object.light_add(type='SUN', location=(0, 0, {cam_distance:.2f}))")
         emit("_sun = bpy.context.active_object")
-        emit("_sun.data.energy = 6.0")
+        emit("_sun.data.energy = 2.0")
         emit(f"bpy.ops.object.light_add(type='AREA', location=("
              f"{cx:.4f}, {cy - cam_distance * 0.5:.4f}, {cz + cam_distance * 0.3:.4f}))")
         emit("_fill = bpy.context.active_object")
-        emit("_fill.data.energy = 40.0")
+        emit("_fill.data.energy = 15.0")
         emit("_fill.data.size = 1.0")
         emit("world = bpy.data.worlds.get('World') or bpy.data.worlds.new('World')")
         emit("scene.world = world")
         emit("world.use_nodes = True")
         emit("bg = world.node_tree.nodes.get('Background')")
         emit("if bg:")
-        emit("    bg.inputs[0].default_value = (0.15, 0.15, 0.18, 1.0)")
+        emit("    bg.inputs[0].default_value = (0.0, 0.0, 0.0, 1.0)")
     else:
         emit(f"bpy.ops.object.light_add(type='SUN', location=(0, 0, {cam_distance:.2f}))")
         emit("_sun = bpy.context.active_object")
@@ -379,27 +379,41 @@ def generate_drivetrain_animation(
         from ..ldraw.model import LDrawBuild
 
         # Reuse the assembly animation's connector-to-unit mapping
-        # which uses port connections (not proximity) for accuracy
         dummy_build = LDrawBuild(name="drivetrain", parts=build_parts)
         connector_to_unit = _map_connectors_to_units(dummy_build, scene)
 
-        # Collect connectors assigned to drivetrain units
+        # Collect connectors assigned to drivetrain units, grouped by unit
         dt_unit_indices = {node.unit_index for node in nodes}
         if motor_unit_idx is not None:
             dt_unit_indices.add(motor_unit_idx)
 
-        dt_connectors = [
-            build_parts[ci] for ci, uid in connector_to_unit.items()
-            if uid in dt_unit_indices
-        ]
+        unit_connectors: Dict[int, List] = {}
+        for ci, uid in connector_to_unit.items():
+            if uid in dt_unit_indices:
+                unit_connectors.setdefault(uid, []).append(build_parts[ci])
 
-        if dt_connectors:
+        if unit_connectors:
             emit("# ── Connectors (axles/pins) ────────────────────────────────")
-            vertices, faces, face_colors = collect_geometry_colored(dt_connectors)
-            if vertices:
+            for uid, conn_parts in sorted(unit_connectors.items()):
+                vertices, faces, face_colors = collect_geometry_colored(conn_parts)
+                if not vertices:
+                    continue
+                # Find the appear frame for this unit
+                # Motor unit appears at frame 1
+                if uid == motor_unit_idx:
+                    conn_appear = 1
+                else:
+                    # Find which node has this unit_index
+                    conn_appear = 1
+                    for ni, node in enumerate(nodes):
+                        if node.unit_index == uid:
+                            conn_appear = node_appear_frames[ni]
+                            break
+
+                cname = f"conn_u{uid}"
                 emit(f"_conn_verts = {vertices!r}")
                 emit(f"_conn_faces = {faces!r}")
-                emit("_conn_mesh = bpy.data.meshes.new('connectors_mesh')")
+                emit(f"_conn_mesh = bpy.data.meshes.new('{cname}_mesh')")
                 emit("_conn_mesh.from_pydata(_conn_verts, [], _conn_faces)")
                 emit(f"_conn_face_colors = {face_colors!r}")
                 emit("_conn_color_set = sorted(set(_conn_face_colors))")
@@ -409,9 +423,20 @@ def generate_drivetrain_animation(
                 emit("for _fi, _fc in enumerate(_conn_face_colors):")
                 emit("    _conn_mesh.polygons[_fi].material_index = _conn_mat_map[_fc]")
                 emit("_conn_mesh.update()")
-                emit("_conn_obj = bpy.data.objects.new('connectors', _conn_mesh)")
+                emit(f"_conn_obj = bpy.data.objects.new('{cname}', _conn_mesh)")
                 emit("bpy.context.collection.objects.link(_conn_obj)")
-                # Connectors visible from frame 1 (always present)
+                # Visibility: appear with the unit they belong to
+                emit("_conn_obj.hide_viewport = True")
+                emit("_conn_obj.hide_render = True")
+                emit("_conn_obj.keyframe_insert(data_path='hide_viewport', frame=1)")
+                emit("_conn_obj.keyframe_insert(data_path='hide_render', frame=1)")
+                if conn_appear > 1:
+                    emit(f"_conn_obj.keyframe_insert(data_path='hide_viewport', frame={conn_appear - 1})")
+                    emit(f"_conn_obj.keyframe_insert(data_path='hide_render', frame={conn_appear - 1})")
+                emit("_conn_obj.hide_viewport = False")
+                emit("_conn_obj.hide_render = False")
+                emit(f"_conn_obj.keyframe_insert(data_path='hide_viewport', frame={conn_appear})")
+                emit(f"_conn_obj.keyframe_insert(data_path='hide_render', frame={conn_appear})")
                 emit("_dt_objects.append(_conn_obj)")
                 emit()
 
