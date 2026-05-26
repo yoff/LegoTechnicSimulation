@@ -61,6 +61,35 @@ run Blender locally — all visual feedback comes from rendered `.mp4` files. An
 - Keep rendered `.mp4` files in the repo root (gitignored) for easy access from
   the IDE.
 
+## Short Feedback Loops
+
+Rendering is expensive (minutes per run).  Always prefer the cheapest validation
+method that answers the question at hand:
+
+1. **No render at all** — the best option when possible.
+   - The **framing check** (`_check_and_adjust_framing()` in generated scripts)
+     uses `world_to_camera_view` to project all bounding boxes into camera space
+     across every frame.  This evaluates transforms in seconds without any GPU
+     rendering and reports screen-space bounds and extreme frames.
+   - `scene.frame_set(f)` updates all object transforms, physics, and IK for a
+     given frame — read positions, rotations, or any property without rendering.
+   - Use this to verify motion ranges, joint angles, or collision before committing
+     to a render.
+
+2. **Diagnostic prints** — emit print statements in the generated Blender script
+   to inspect simulation values (rotation angles, positions, constraint forces).
+   The existing diagnostics block samples frames and prints rotation magnitudes.
+   Add more as needed — it runs in seconds.
+
+3. **Minimal render** — when you must see pixels, use the lowest viable settings:
+   - `scene.cycles.samples = 4` (vs 128 for production)
+   - Render only 1–2 specific frames (`scene.frame_start = scene.frame_end = N`)
+   - Use low resolution (e.g. 150×150) even for full-animation test renders.
+   - `--fast` flag sets 480×270, 4 samples in the CLI.
+
+4. **Full render** — only after framing, motion, and lighting are confirmed correct.
+   Use 128 samples, full frame range, final resolution.
+
 ## Creating and Maintaining Tests
 
 ### Test Architecture
