@@ -63,7 +63,8 @@ run Blender locally — all visual feedback comes from rendered `.mp4` files. An
 
 ## Short Feedback Loops
 
-Rendering is expensive (minutes per run).  Always prefer the cheapest validation
+This is a general strategy that should be considered whenever expensive operations are involved.
+Consider rendering as an example, this can take minutes to run. Always prefer the cheapest validation
 method that answers the question at hand:
 
 1. **No render at all** — the best option when possible.
@@ -89,6 +90,8 @@ method that answers the question at hand:
 
 4. **Full render** — only after framing, motion, and lighting are confirmed correct.
    Use 128 samples, full frame range, final resolution.
+
+For other expensive operations, the breakdown may be different, but the principle is the same: prefer the cheapest validation method that answers the question at hand. For example, when changing the core physics algorithm, first verify unit/joint counts and port matches before generating a full simulation.
 
 ## Creating and Maintaining Tests
 

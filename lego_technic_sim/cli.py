@@ -261,6 +261,7 @@ def main(argv: list[str] | None = None) -> None:
         if args.presentation:
             kwargs["presentation"] = True
             kwargs["ldraw_library"] = Path(args.ldraw_library) if args.ldraw_library else None
+            kwargs["build_parts"] = build.parts
 
         generate_drivetrain_animation(
             tree,

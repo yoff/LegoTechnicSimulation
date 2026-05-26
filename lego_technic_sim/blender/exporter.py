@@ -48,6 +48,7 @@ from .geometry import (
     collect_geometry_colored,
     parse_ldconfig,
     emit_kinematic_rotation,
+    emit_lighting_check,
 )
 
 
@@ -1132,6 +1133,12 @@ def generate_blender_script(
     emit("    print(f'{_f:5d} | ' + ' | '.join(_vals))")
     emit("print('=== END DIAGNOSTICS ===\\n')")
     emit()
+
+    # ------------------------------------------------------------------
+    # Lighting check – renders a tiny test frame and adjusts light energy.
+    # ------------------------------------------------------------------
+    if _runtime_geometry:
+        emit_lighting_check(emit)
 
     # ------------------------------------------------------------------
     # Framing check – projects all unit bounding boxes into camera space

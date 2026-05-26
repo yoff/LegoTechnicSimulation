@@ -19,6 +19,7 @@ from .geometry import (
     collect_geometry,
     collect_geometry_colored,
     emit_kinematic_rotation,
+    emit_lighting_check,
     parse_ldconfig,
 )
 
@@ -39,6 +40,7 @@ def generate_drivetrain_animation(
     appear_frames: int = 6,
     presentation: bool = False,
     ldraw_library: Optional[Path] = None,
+    build_parts: Optional[List] = None,
 ) -> str:
     """Generate Blender script showing the drive train in action.
 
@@ -59,6 +61,9 @@ def generate_drivetrain_animation(
                         by depth (same depth appears simultaneously), and
                         disable text annotations.
         ldraw_library:  Path to LDraw library (for color lookup in presentation mode).
+        build_parts:    Full list of LDrawParts from the build (includes connectors).
+                        When provided in presentation mode, connectors (axles/pins)
+                        between drivetrain units are rendered as static geometry.
     """
     scene = tree.scene
     nodes = tree.all_nodes
@@ -368,6 +373,67 @@ def generate_drivetrain_animation(
         emit("_dt_objects.append(_kin_obj)")
         emit()
 
+    # Render connector parts (axles/pins) in presentation mode
+    if presentation and build_parts:
+        from ..physics.connectors import is_connector
+
+        # Collect unit indices in the drivetrain
+        dt_unit_indices = {node.unit_index for node in nodes}
+        if motor_unit_idx is not None:
+            dt_unit_indices.add(motor_unit_idx)
+
+        # Find connectors whose position is near a drivetrain unit
+        # Simple heuristic: render all connectors that are spatially close
+        # to any drivetrain unit's center of mass
+        dt_positions = []
+        for uid in dt_unit_indices:
+            unit = scene.units[uid]
+            dt_positions.append(unit.center_of_mass)
+
+        connector_parts = [p for p in build_parts if is_connector(p.part_id)]
+        if connector_parts:
+            emit("# ── Connectors (axles/pins) ────────────────────────────────")
+            # Use a distance threshold: connectors within reach of a DT unit
+            # Technic parts are ~20 LDU apart; max axle length ~5 holes = 100 LDU
+            threshold = 60.0  # LDU — generous to catch all axles
+            nearby_connectors = []
+            for cp in connector_parts:
+                cp_pos = np.mean([tri.v0 for tri in cp.triangles], axis=0) if cp.triangles else np.zeros(3)
+                for dt_pos in dt_positions:
+                    dist = float(np.linalg.norm(cp_pos - dt_pos))
+                    if dist < threshold:
+                        nearby_connectors.append(cp)
+                        break
+
+            if nearby_connectors:
+                vertices, faces, face_colors = collect_geometry_colored(nearby_connectors)
+                if vertices:
+                    emit(f"_conn_verts = {vertices!r}")
+                    emit(f"_conn_faces = {faces!r}")
+                    emit("_conn_mesh = bpy.data.meshes.new('connectors_mesh')")
+                    emit("_conn_mesh.from_pydata(_conn_verts, [], _conn_faces)")
+                    emit(f"_conn_face_colors = {face_colors!r}")
+                    emit("_conn_color_set = sorted(set(_conn_face_colors))")
+                    emit("for _cc in _conn_color_set:")
+                    emit("    _conn_mesh.materials.append(_get_ldraw_mat(_cc))")
+                    emit("_conn_mat_map = {_cc: i for i, _cc in enumerate(_conn_color_set)}")
+                    emit("for _fi, _fc in enumerate(_conn_face_colors):")
+                    emit("    _conn_mesh.polygons[_fi].material_index = _conn_mat_map[_fc]")
+                    emit("_conn_mesh.update()")
+                    emit("_conn_obj = bpy.data.objects.new('connectors', _conn_mesh)")
+                    emit("bpy.context.collection.objects.link(_conn_obj)")
+                    # Connectors appear with the first node
+                    emit("_conn_obj.hide_viewport = True")
+                    emit("_conn_obj.hide_render = True")
+                    emit("_conn_obj.keyframe_insert(data_path='hide_viewport', frame=1)")
+                    emit("_conn_obj.keyframe_insert(data_path='hide_render', frame=1)")
+                    emit("_conn_obj.hide_viewport = False")
+                    emit("_conn_obj.hide_render = False")
+                    emit("_conn_obj.keyframe_insert(data_path='hide_viewport', frame=2)")
+                    emit("_conn_obj.keyframe_insert(data_path='hide_render', frame=2)")
+                    emit("_dt_objects.append(_conn_obj)")
+                    emit()
+
     # Set constant interpolation for visibility
     emit("for obj in _dt_objects:")
     emit("    if obj.animation_data and obj.animation_data.action:")
@@ -423,6 +489,10 @@ def generate_drivetrain_animation(
     emit("comp = tree.nodes.new('CompositorNodeComposite')")
     emit("tree.links.new(rl.outputs['Image'], comp.inputs['Image'])")
     emit()
+
+    # Lighting auto-adjustment (presentation mode)
+    if presentation:
+        emit_lighting_check(emit, check_frame=total_frames)
 
     # Render
     emit("print(f'Rendering {scene.frame_end} drive train frames...')")
