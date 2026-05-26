@@ -1,20 +1,40 @@
 #!/usr/bin/env bash
-# Generate three looping GIF animations of Walker1's leg cycle.
+# Generate three looping animations of Walker1's leg cycle.
 #
-# Outputs:
-#   walker1_cycle_side.gif  – orthographic side view
-#   walker1_cycle_persp.gif – perspective side view (near legs larger)
-#   walker1_cycle_front.gif – perspective from slightly in front and above
+# Outputs (per variant: side, persp, front):
+#   walker1_cycle_<variant>.gif  – GIF (256 colors, universal markdown support)
+#   walker1_cycle_<variant>.webm – WebM VP9 (much smaller, modern browsers)
+#   walker1_cycle_<variant>.mp4  – MP4 H.264 (small, universal browser playback)
+#
+# Format selection (via FORMAT env var or --format flag):
+#   FORMAT=all   – output GIF + WebM + MP4 (default)
+#   FORMAT=gif   – GIF only (for GitHub README, universal but large)
+#   FORMAT=webm  – WebM only (best size/quality, not in GitHub markdown)
+#   FORMAT=mp4   – MP4 only (good size/quality, not in GitHub markdown)
+#
+# Trade-offs:
+#   GIF:  ~300-400 KB, 256 colors, loops natively in <img>, GitHub markdown ✓
+#   WebM: ~20-40 KB, full color, needs <video> tag, GitHub markdown ✗
+#   MP4:  ~30-50 KB, full color, needs <video> tag, GitHub markdown ✗
 #
 # Requirements:
 #   - pip install -e . (this project)
 #   - pip install Pillow
 #   - LDraw library at /opt/ldraw/ldraw (or set LDRAW_LIBRARY env var)
 #   - Blender at BLENDER_PATH
-#   - gifsicle (apt install gifsicle) for optimisation
+#   - gifsicle (apt install gifsicle) for GIF optimisation
+#   - ffmpeg for WebM/MP4 output
 
 set -euo pipefail
 
+# Parse --format flag if provided
+for arg in "$@"; do
+    case "$arg" in
+        --format=*) FORMAT="${arg#*=}" ;;
+    esac
+done
+
+FORMAT="${FORMAT:-all}"
 LDRAW_LIBRARY="${LDRAW_LIBRARY:-/opt/ldraw/ldraw}"
 BLENDER_PATH="${BLENDER_PATH:-/home/codespace/apps/blender/blender-4.1.0-linux-x64/blender}"
 MODEL="${MODEL:-sample_models/Walker1/Walker1.ldr}"
@@ -23,6 +43,8 @@ BASE_SCRIPT="/tmp/walker1_gif_base.py"
 
 # One full crank rotation at 60fps ≈ 96 frames (motor 23.04 rad/s, ratio 0.171)
 SIM_FRAMES=96
+
+echo "Output format: ${FORMAT}"
 
 echo "=== Generating base Blender script (${SIM_FRAMES} frames) ==="
 python -m lego_technic_sim.cli \
@@ -85,21 +107,33 @@ with open('${script}', 'w') as f:
 
     rm -rf "${FRAMES_DIR}"
     mkdir -p "${FRAMES_DIR}"
-    "${BLENDER_PATH}" --background --python "${script}" 2>&1 | grep -E "Rendering|Simulation|Error" | tail -5
+    "${BLENDER_PATH}" --background --python "${script}" 2>&1 | grep -E "Rendering|Simulation|Error|Framing" | tail -10
 
-    echo "  Converting to GIF..."
-    python3 -c "
+    echo "  Converting frames to output format(s)..."
+
+    # --- GIF output ---
+    if [[ "${FORMAT}" == "all" || "${FORMAT}" == "gif" ]]; then
+        python3 -c "
 from PIL import Image
 import glob, os
 
 paths = sorted(glob.glob('${FRAMES_DIR}/frame_*.png'))
 frames = []
+# Build global palette from sampled frames
+sample_indices = list(range(0, len(paths), max(1, len(paths) // 8)))
+composite = Image.new('RGB', Image.open(paths[0]).size)
+for si in sample_indices:
+    img = Image.open(paths[si]).convert('RGBA')
+    bg = Image.new('RGBA', img.size, (255, 255, 255, 255))
+    composite.paste(Image.alpha_composite(bg, img))
+global_palette = composite.quantize(colors=192, method=Image.Quantize.MEDIANCUT)
+
 for i, p in enumerate(paths):
     if i % 2 == 0:  # 30fps
         img = Image.open(p).convert('RGBA')
         bg = Image.new('RGBA', img.size, (255, 255, 255, 255))
-        composite = Image.alpha_composite(bg, img)
-        frames.append(composite.convert('P', palette=Image.ADAPTIVE, colors=192))
+        rgb = Image.alpha_composite(bg, img).convert('RGB')
+        frames.append(rgb.quantize(palette=global_palette))
 
 loop_frames = frames[:-1]  # skip last for seamless loop
 loop_frames[0].save(
@@ -110,14 +144,35 @@ loop_frames[0].save(
     loop=0,
     optimize=True
 )
-print(f'  Raw: {os.path.getsize(\"walker1_cycle_${name}.gif\")//1024} KB, {len(loop_frames)} frames')
+print(f'  GIF raw: {os.path.getsize(\"walker1_cycle_${name}.gif\")//1024} KB, {len(loop_frames)} frames')
 "
-
-    if command -v gifsicle &>/dev/null; then
-        gifsicle -O3 --colors 192 --lossy=40 "walker1_cycle_${name}.gif" \
-            -o "walker1_cycle_${name}.gif"
+        if command -v gifsicle &>/dev/null; then
+            gifsicle -O3 --colors 192 --lossy=40 "walker1_cycle_${name}.gif" \
+                -o "walker1_cycle_${name}.gif"
+        fi
+        echo "  GIF: $(du -h "walker1_cycle_${name}.gif" | cut -f1)"
     fi
-    echo "  Final: $(du -h "walker1_cycle_${name}.gif" | cut -f1)"
+
+    # --- WebM output (VP9, very small, looping, supports alpha) ---
+    if [[ "${FORMAT}" == "all" || "${FORMAT}" == "webm" ]]; then
+        ffmpeg -y -framerate 60 -start_number 1 -i "${FRAMES_DIR}/frame_%04d.png" \
+            -vf "fps=30" -frames:v 47 \
+            -c:v libvpx-vp9 -pix_fmt yuva420p -crf 30 -b:v 0 \
+            -auto-alt-ref 0 -an \
+            "walker1_cycle_${name}.webm" 2>/dev/null
+        echo "  WebM: $(du -h "walker1_cycle_${name}.webm" | cut -f1)"
+    fi
+
+    # --- MP4 output (H.264, widely compatible, white background) ---
+    if [[ "${FORMAT}" == "all" || "${FORMAT}" == "mp4" ]]; then
+        ffmpeg -y -framerate 60 -start_number 1 -i "${FRAMES_DIR}/frame_%04d.png" \
+            -vf "fps=30,format=yuva420p,colorchannelmixer=aa=1,pad=iw:ih:0:0:white,format=yuv420p" \
+            -frames:v 47 \
+            -c:v libx264 -crf 23 -preset veryslow -an \
+            -movflags +faststart \
+            "walker1_cycle_${name}.mp4" 2>/dev/null
+        echo "  MP4: $(du -h "walker1_cycle_${name}.mp4" | cut -f1)"
+    fi
 }
 
 # --- Variant 1: Orthographic side view ---
@@ -157,4 +212,4 @@ _cam.rotation_euler = _direction.to_track_quat('"'"'-Z'"'"', '"'"'Y'"'"').to_eul
 
 echo ""
 echo "=== All done ==="
-ls -lh walker1_cycle_*.gif
+ls -lh walker1_cycle_*.{gif,webm,mp4} 2>/dev/null || true
