@@ -96,6 +96,14 @@ def _build_parser() -> argparse.ArgumentParser:
         ),
     )
     p.add_argument(
+        "--presentation",
+        action="store_true",
+        help=(
+            "Presentation mode for drivetrain animation: realistic LDraw "
+            "colors, same-depth units appear simultaneously, no annotations."
+        ),
+    )
+    p.add_argument(
         "--simulate",
         action="store_true",
         help=(
@@ -250,6 +258,9 @@ def main(argv: list[str] | None = None) -> None:
                 spin_frames=12,
                 appear_frames=2,
             )
+        if args.presentation:
+            kwargs["presentation"] = True
+            kwargs["ldraw_library"] = Path(args.ldraw_library) if args.ldraw_library else None
 
         generate_drivetrain_animation(
             tree,

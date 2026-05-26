@@ -8,7 +8,7 @@ visualising how power flows through the mechanism.
 from __future__ import annotations
 
 from pathlib import Path
-from typing import List, Optional
+from typing import Dict, List, Optional, Tuple
 
 import numpy as np
 
@@ -17,7 +17,9 @@ from ..physics.model import Unit
 from .geometry import (
     ldraw_to_blender as _ldraw_to_blender,
     collect_geometry,
+    collect_geometry_colored,
     emit_kinematic_rotation,
+    parse_ldconfig,
 )
 
 
@@ -35,6 +37,8 @@ def generate_drivetrain_animation(
     cycles_samples: int = 32,
     spin_frames: int = 48,
     appear_frames: int = 6,
+    presentation: bool = False,
+    ldraw_library: Optional[Path] = None,
 ) -> str:
     """Generate Blender script showing the drive train in action.
 
@@ -51,6 +55,10 @@ def generate_drivetrain_animation(
         cycles_samples: Cycles samples.
         spin_frames:    Frames each node spins before next appears.
         appear_frames:  Frames to pause when a new node appears (before spin).
+        presentation:   If True, use realistic LDraw colors, group units
+                        by depth (same depth appears simultaneously), and
+                        disable text annotations.
+        ldraw_library:  Path to LDraw library (for color lookup in presentation mode).
     """
     scene = tree.scene
     nodes = tree.all_nodes
@@ -62,8 +70,21 @@ def generate_drivetrain_animation(
         motor_joint = scene.joints[scene.motors[0].joint_index]
         motor_unit_idx = motor_joint.unit_a_index
 
-    # Total frames: each node gets appear_frames + spin_frames
-    total_frames = n_nodes * (appear_frames + spin_frames) + spin_frames
+    # In presentation mode, group nodes by depth so same-depth units appear together
+    if presentation:
+        depth_groups: Dict[int, List[int]] = {}
+        for idx, node in enumerate(nodes):
+            depth_groups.setdefault(node.depth, []).append(idx)
+        sorted_depths = sorted(depth_groups.keys())
+        n_groups = len(sorted_depths)
+        total_frames = n_groups * (appear_frames + spin_frames) + spin_frames
+    else:
+        total_frames = n_nodes * (appear_frames + spin_frames) + spin_frames
+
+    # Parse LDraw colors for presentation mode
+    ldraw_colors: Dict[int, Tuple[float, float, float]] = {}
+    if presentation:
+        ldraw_colors = parse_ldconfig(ldraw_library)
 
     # Compute scene bounds for camera (include motor unit if present)
     all_positions = []
@@ -129,16 +150,55 @@ def generate_drivetrain_animation(
     emit()
 
     # Lighting
-    emit(f"bpy.ops.object.light_add(type='SUN', location=(0, 0, {cam_distance:.2f}))")
-    emit("_sun = bpy.context.active_object")
-    emit("_sun.data.energy = 3.0")
-    emit("world = bpy.data.worlds.get('World') or bpy.data.worlds.new('World')")
-    emit("scene.world = world")
-    emit("world.use_nodes = True")
-    emit("bg = world.node_tree.nodes.get('Background')")
-    emit("if bg:")
-    emit("    bg.inputs[0].default_value = (0.05, 0.05, 0.08, 1.0)")
+    if presentation:
+        emit(f"bpy.ops.object.light_add(type='SUN', location=(0, 0, {cam_distance:.2f}))")
+        emit("_sun = bpy.context.active_object")
+        emit("_sun.data.energy = 6.0")
+        emit(f"bpy.ops.object.light_add(type='AREA', location=("
+             f"{cx:.4f}, {cy - cam_distance * 0.5:.4f}, {cz + cam_distance * 0.3:.4f}))")
+        emit("_fill = bpy.context.active_object")
+        emit("_fill.data.energy = 40.0")
+        emit("_fill.data.size = 1.0")
+        emit("world = bpy.data.worlds.get('World') or bpy.data.worlds.new('World')")
+        emit("scene.world = world")
+        emit("world.use_nodes = True")
+        emit("bg = world.node_tree.nodes.get('Background')")
+        emit("if bg:")
+        emit("    bg.inputs[0].default_value = (0.15, 0.15, 0.18, 1.0)")
+    else:
+        emit(f"bpy.ops.object.light_add(type='SUN', location=(0, 0, {cam_distance:.2f}))")
+        emit("_sun = bpy.context.active_object")
+        emit("_sun.data.energy = 3.0")
+        emit("world = bpy.data.worlds.get('World') or bpy.data.worlds.new('World')")
+        emit("scene.world = world")
+        emit("world.use_nodes = True")
+        emit("bg = world.node_tree.nodes.get('Background')")
+        emit("if bg:")
+        emit("    bg.inputs[0].default_value = (0.05, 0.05, 0.08, 1.0)")
     emit()
+
+    # LDraw color materials (presentation mode)
+    if presentation and ldraw_colors:
+        emit("# ── LDraw color materials ──────────────────────────────────")
+        emit("_ldraw_colors = {}")
+        for code, (r, g, b) in sorted(ldraw_colors.items()):
+            emit(f"_ldraw_colors[{code}] = ({r:.4f}, {g:.4f}, {b:.4f})")
+        emit("")
+        emit("def _get_ldraw_mat(code):")
+        emit("    name = f'LDraw_{code}'")
+        emit("    mat = bpy.data.materials.get(name)")
+        emit("    if mat:")
+        emit("        return mat")
+        emit("    mat = bpy.data.materials.new(name=name)")
+        emit("    mat.use_nodes = True")
+        emit("    bsdf = mat.node_tree.nodes.get('Principled BSDF')")
+        emit("    if bsdf:")
+        emit("        r, g, b = _ldraw_colors.get(code, (0.5, 0.5, 0.5))")
+        emit("        bsdf.inputs['Base Color'].default_value = (r, g, b, 1.0)")
+        emit("        bsdf.inputs['Roughness'].default_value = 0.3")
+        emit("        bsdf.inputs['Specular IOR Level'].default_value = 0.5")
+        emit("    return mat")
+        emit()
 
     # Create mesh objects for each drive train node
     emit("_dt_objects = []")
@@ -151,14 +211,28 @@ def generate_drivetrain_animation(
         motor_unit = scene.units[motor_unit_idx]
         motor_bricks = [b for b in motor_unit.bricks if is_motor_part(b.part_id)]
         motor_name = "motor"
-        vertices, faces = collect_geometry(motor_bricks)
 
         emit(f"# Motor brick (from unit {motor_unit_idx}, static)")
+        if presentation:
+            vertices, faces, face_colors = collect_geometry_colored(motor_bricks)
+        else:
+            vertices, faces = collect_geometry(motor_bricks)
+
         if vertices:
             emit(f"_verts = {vertices!r}")
             emit(f"_faces = {faces!r}")
             emit(f"_mesh = bpy.data.meshes.new({motor_name + '_mesh'!r})")
             emit("_mesh.from_pydata(_verts, [], _faces)")
+            if presentation:
+                # Assign per-face LDraw materials
+                unique_colors = sorted(set(face_colors))
+                emit(f"_face_colors = {face_colors!r}")
+                emit("_color_set = sorted(set(_face_colors))")
+                emit("for _cc in _color_set:")
+                emit("    _mesh.materials.append(_get_ldraw_mat(_cc))")
+                emit("_mat_idx_map = {_cc: i for i, _cc in enumerate(_color_set)}")
+                emit("for _fi, _fc in enumerate(_face_colors):")
+                emit("    _mesh.polygons[_fi].material_index = _mat_idx_map[_fc]")
             emit("_mesh.update()")
             emit(f"_motor_obj = bpy.data.objects.new({motor_name!r}, _mesh)")
             emit("bpy.context.collection.objects.link(_motor_obj)")
@@ -169,13 +243,14 @@ def generate_drivetrain_animation(
             emit("_motor_obj = bpy.context.active_object")
             emit(f"_motor_obj.name = {motor_name!r}")
 
-        # Dark grey material for motor
-        emit("_mmat = bpy.data.materials.new(name='mat_motor')")
-        emit("_mmat.use_nodes = True")
-        emit("_mbsdf = _mmat.node_tree.nodes.get('Principled BSDF')")
-        emit("if _mbsdf:")
-        emit("    _mbsdf.inputs['Base Color'].default_value = (0.25, 0.25, 0.25, 1.0)")
-        emit("_motor_obj.data.materials.append(_mmat)")
+        if not presentation:
+            # Dark grey material for motor
+            emit("_mmat = bpy.data.materials.new(name='mat_motor')")
+            emit("_mmat.use_nodes = True")
+            emit("_mbsdf = _mmat.node_tree.nodes.get('Principled BSDF')")
+            emit("if _mbsdf:")
+            emit("    _mbsdf.inputs['Base Color'].default_value = (0.25, 0.25, 0.25, 1.0)")
+            emit("_motor_obj.data.materials.append(_mmat)")
         emit()
 
         # Visible from frame 1 (same as first gear)
@@ -183,22 +258,48 @@ def generate_drivetrain_animation(
         emit("_motor_obj.hide_render = False")
         emit()
 
+    # Compute appear_frame per node
+    # In presentation mode: group by depth, same depth = same frame
+    # In debug mode: sequential, one per node
+    node_appear_frames: List[int] = []
+    if presentation:
+        depth_to_frame = {}
+        for group_idx, depth in enumerate(sorted_depths):
+            depth_to_frame[depth] = group_idx * (appear_frames + spin_frames) + 1
+        for node in nodes:
+            node_appear_frames.append(depth_to_frame[node.depth])
+    else:
+        for node_idx in range(n_nodes):
+            node_appear_frames.append(node_idx * (appear_frames + spin_frames) + 1)
+
     for node_idx, node in enumerate(nodes):
         unit = scene.units[node.unit_index]
         safe_name = f"dt_{node_idx}_{unit.name}".replace('"', "")
 
-        vertices, faces = collect_geometry(unit.bricks)
-
-        appear_frame = node_idx * (appear_frames + spin_frames) + 1
+        appear_frame = node_appear_frames[node_idx]
 
         emit(f"# DriveNode {node_idx}: unit {node.unit_index} depth={node.depth} "
              f"ratio={node.accumulated_ratio:.3f}")
+
+        if presentation:
+            vertices, faces, face_colors = collect_geometry_colored(unit.bricks)
+        else:
+            vertices, faces = collect_geometry(unit.bricks)
 
         if vertices:
             emit(f"_verts = {vertices!r}")
             emit(f"_faces = {faces!r}")
             emit(f"_mesh = bpy.data.meshes.new({safe_name + '_mesh'!r})")
             emit("_mesh.from_pydata(_verts, [], _faces)")
+            if presentation:
+                # Per-face LDraw materials
+                emit(f"_face_colors = {face_colors!r}")
+                emit("_color_set = sorted(set(_face_colors))")
+                emit("for _cc in _color_set:")
+                emit("    _mesh.materials.append(_get_ldraw_mat(_cc))")
+                emit("_mat_idx_map = {_cc: i for i, _cc in enumerate(_color_set)}")
+                emit("for _fi, _fc in enumerate(_face_colors):")
+                emit("    _mesh.polygons[_fi].material_index = _mat_idx_map[_fc]")
             emit("_mesh.update()")
             emit(f"_obj = bpy.data.objects.new({safe_name!r}, _mesh)")
             emit("bpy.context.collection.objects.link(_obj)")
@@ -209,15 +310,16 @@ def generate_drivetrain_animation(
             emit("_obj = bpy.context.active_object")
             emit(f"_obj.name = {safe_name!r}")
 
-        # Material - colour by depth
-        emit(f"_mat = bpy.data.materials.new(name='mat_dt_{node_idx}')")
-        emit("_mat.use_nodes = True")
-        emit("_bsdf = _mat.node_tree.nodes.get('Principled BSDF')")
-        emit(f"_hue = {node.depth} / max({max(n.depth for n in nodes) + 1}, 1)")
-        emit("_r, _g, _b = colorsys.hsv_to_rgb(_hue, 0.8, 0.95)")
-        emit("if _bsdf:")
-        emit("    _bsdf.inputs['Base Color'].default_value = (_r, _g, _b, 1.0)")
-        emit("_obj.data.materials.append(_mat)")
+        if not presentation:
+            # Material - colour by depth (debug mode)
+            emit(f"_mat = bpy.data.materials.new(name='mat_dt_{node_idx}')")
+            emit("_mat.use_nodes = True")
+            emit("_bsdf = _mat.node_tree.nodes.get('Principled BSDF')")
+            emit(f"_hue = {node.depth} / max({max(n.depth for n in nodes) + 1}, 1)")
+            emit("_r, _g, _b = colorsys.hsv_to_rgb(_hue, 0.8, 0.95)")
+            emit("if _bsdf:")
+            emit("    _bsdf.inputs['Base Color'].default_value = (_r, _g, _b, 1.0)")
+            emit("_obj.data.materials.append(_mat)")
         emit()
 
         # Visibility keyframes
@@ -274,42 +376,43 @@ def generate_drivetrain_animation(
     emit("                kp.interpolation = 'CONSTANT'")
     emit()
 
-    # Stamp overlay with per-frame unit labels
-    emit("scene.render.use_stamp = True")
-    emit("scene.render.use_stamp_note = True")
-    emit("scene.render.stamp_font_size = 24")
-    emit("scene.render.use_stamp_date = False")
-    emit("scene.render.use_stamp_time = False")
-    emit("scene.render.use_stamp_render_time = False")
-    emit("scene.render.use_stamp_frame = True")
-    emit("scene.render.use_stamp_camera = False")
-    emit("scene.render.use_stamp_scene = False")
-    emit("scene.render.use_stamp_filename = False")
-    emit("scene.render.use_stamp_memory = False")
-    emit("scene.render.use_stamp_hostname = False")
-    emit("scene.render.stamp_foreground = (1, 1, 1, 1)")
-    emit("scene.render.stamp_background = (0, 0, 0, 0.6)")
-    emit()
+    # Stamp overlay with per-frame unit labels (debug mode only)
+    if not presentation:
+        emit("scene.render.use_stamp = True")
+        emit("scene.render.use_stamp_note = True")
+        emit("scene.render.stamp_font_size = 24")
+        emit("scene.render.use_stamp_date = False")
+        emit("scene.render.use_stamp_time = False")
+        emit("scene.render.use_stamp_render_time = False")
+        emit("scene.render.use_stamp_frame = True")
+        emit("scene.render.use_stamp_camera = False")
+        emit("scene.render.use_stamp_scene = False")
+        emit("scene.render.use_stamp_filename = False")
+        emit("scene.render.use_stamp_memory = False")
+        emit("scene.render.use_stamp_hostname = False")
+        emit("scene.render.stamp_foreground = (1, 1, 1, 1)")
+        emit("scene.render.stamp_background = (0, 0, 0, 0.6)")
+        emit()
 
-    # Build frame→label map
-    frame_labels: dict[int, str] = {}
-    for node_idx, node in enumerate(nodes):
-        af = node_idx * (appear_frames + spin_frames) + 1
-        frame_labels[af] = (
-            f"Unit {node.unit_index} (depth={node.depth}, "
-            f"ratio={node.accumulated_ratio:.2f})"
-        )
-    emit(f"_frame_labels = {frame_labels!r}")
-    emit("def _dt_label_handler(scene_ref):")
-    emit("    frame = scene_ref.frame_current")
-    emit("    label = 'Drive Train'")
-    emit("    for f in sorted(_frame_labels.keys()):")
-    emit("        if f <= frame:")
-    emit("            label = _frame_labels[f]")
-    emit("    scene_ref.render.stamp_note_text = label")
-    emit()
-    emit("bpy.app.handlers.frame_change_pre.append(_dt_label_handler)")
-    emit()
+        # Build frame→label map
+        frame_labels: dict[int, str] = {}
+        for node_idx, node in enumerate(nodes):
+            af = node_appear_frames[node_idx]
+            frame_labels[af] = (
+                f"Unit {node.unit_index} (depth={node.depth}, "
+                f"ratio={node.accumulated_ratio:.2f})"
+            )
+        emit(f"_frame_labels = {frame_labels!r}")
+        emit("def _dt_label_handler(scene_ref):")
+        emit("    frame = scene_ref.frame_current")
+        emit("    label = 'Drive Train'")
+        emit("    for f in sorted(_frame_labels.keys()):")
+        emit("        if f <= frame:")
+        emit("            label = _frame_labels[f]")
+        emit("    scene_ref.render.stamp_note_text = label")
+        emit()
+        emit("bpy.app.handlers.frame_change_pre.append(_dt_label_handler)")
+        emit()
 
     # Compositing
     emit("scene.use_nodes = True")

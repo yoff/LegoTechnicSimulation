@@ -521,13 +521,7 @@ def generate_blender_script(
     elif collision_mode == "none":
         # Ground must be in collection 1 to collide with units
         emit("_ground.rigid_body.collision_collections[1] = True")
-    if render:
-        emit("_gmat = bpy.data.materials.new(name='ground_mat')")
-        emit("_gmat.use_nodes = True")
-        emit("_gbsdf = _gmat.node_tree.nodes.get('Principled BSDF')")
-        emit("if _gbsdf:")
-        emit("    _gbsdf.inputs['Base Color'].default_value = (0.3, 0.3, 0.3, 1.0)")
-        emit("_ground.data.materials.append(_gmat)")
+    emit("_ground.hide_render = True")
     emit()
 
     # ------------------------------------------------------------------
