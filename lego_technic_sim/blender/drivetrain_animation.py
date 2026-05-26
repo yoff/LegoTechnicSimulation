@@ -375,22 +375,47 @@ def generate_drivetrain_animation(
 
     # Render connector parts (axles/pins) in presentation mode
     if presentation and build_parts:
-        from .assembly_animation import _map_connectors_to_units
         from ..ldraw.model import LDrawBuild
+        from ..physics.connectors import is_connector
+        from ..physics.unit_builder import _find_port_connections
 
-        # Reuse the assembly animation's connector-to-unit mapping
-        dummy_build = LDrawBuild(name="drivetrain", parts=build_parts)
-        connector_to_unit = _map_connectors_to_units(dummy_build, scene)
-
-        # Collect connectors assigned to drivetrain units, grouped by unit
+        # Only include connectors whose ALL connections are within the DT
         dt_unit_indices = {node.unit_index for node in nodes}
         if motor_unit_idx is not None:
             dt_unit_indices.add(motor_unit_idx)
 
+        # Build part identity → unit index lookup
+        brick_to_unit: Dict[int, int] = {}
+        for uid, unit in enumerate(scene.units):
+            for brick in unit.bricks:
+                brick_to_unit[id(brick)] = uid
+
+        connector_indices = [i for i, p in enumerate(build_parts)
+                            if is_connector(p.part_id)]
+        structural_tuples = [(i, build_parts[i]) for i in range(len(build_parts))
+                            if not is_connector(build_parts[i].part_id)]
+
         unit_connectors: Dict[int, List] = {}
-        for ci, uid in connector_to_unit.items():
-            if uid in dt_unit_indices:
-                unit_connectors.setdefault(uid, []).append(build_parts[ci])
+        for ci in connector_indices:
+            conn_part = build_parts[ci]
+            connections = _find_port_connections(conn_part, structural_tuples)
+            if not connections:
+                continue
+            # Get the units this connector touches
+            connected_units = set()
+            for gi, ct in connections:
+                part = build_parts[gi]
+                uid = brick_to_unit.get(id(part))
+                if uid is not None:
+                    connected_units.add(uid)
+            # Only include connectors that bridge two different DT units
+            if len(connected_units) > 1 and connected_units.issubset(dt_unit_indices):
+                # Assign to the latest-appearing unit it connects
+                primary_uid = max(connected_units,
+                                  key=lambda u: next(
+                                      (node_appear_frames[ni] for ni, n in enumerate(nodes)
+                                       if n.unit_index == u), 1))
+                unit_connectors.setdefault(primary_uid, []).append(conn_part)
 
         if unit_connectors:
             emit("# ── Connectors (axles/pins) ────────────────────────────────")
