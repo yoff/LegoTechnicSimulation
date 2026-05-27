@@ -163,6 +163,16 @@ def _build_parser() -> argparse.ArgumentParser:
         ),
     )
     p.add_argument(
+        "--resolution",
+        type=str,
+        default=None,
+        metavar="WxH",
+        help=(
+            "Output resolution as WIDTHxHEIGHT (e.g. 150x150, 1920x1080). "
+            "Overrides --fast default of 480x270."
+        ),
+    )
+    p.add_argument(
         "--mujoco",
         action="store_true",
         help=(
@@ -184,6 +194,16 @@ def _build_parser() -> argparse.ArgumentParser:
 def main(argv: list[str] | None = None) -> None:
     """Entry point for the ``lego-technic-sim`` command."""
     args = _build_parser().parse_args(argv)
+
+    # Parse --resolution WxH
+    res_x, res_y = None, None
+    if args.resolution:
+        parts = args.resolution.lower().split("x")
+        if len(parts) == 2 and parts[0].isdigit() and parts[1].isdigit():
+            res_x, res_y = int(parts[0]), int(parts[1])
+        else:
+            print(f"Invalid resolution format: {args.resolution!r} (expected WxH, e.g. 150x150)")
+            return
 
     # Lazy imports so the module is importable even without heavy deps at
     # import time (useful for --help and for testing argument parsing).
@@ -258,6 +278,9 @@ def main(argv: list[str] | None = None) -> None:
                 spin_frames=12,
                 appear_frames=2,
             )
+        if res_x is not None:
+            kwargs["resolution_x"] = res_x
+            kwargs["resolution_y"] = res_y
         if args.presentation:
             kwargs["presentation"] = True
             kwargs["ldraw_library"] = Path(args.ldraw_library) if args.ldraw_library else None
@@ -285,6 +308,9 @@ def main(argv: list[str] | None = None) -> None:
                 resolution_y=270,
                 cycles_samples=4,
             )
+        if res_x is not None:
+            kwargs["resolution_x"] = res_x
+            kwargs["resolution_y"] = res_y
 
         generate_assembly_animation(
             scene,
@@ -310,6 +336,9 @@ def main(argv: list[str] | None = None) -> None:
                 cycles_samples=4,
                 sim_frames=min(sim_frames, 60),
             )
+        if res_x is not None:
+            kwargs["resolution_x"] = res_x
+            kwargs["resolution_y"] = res_y
 
         # Determine follow target
         follow_unit = args.follow_unit
