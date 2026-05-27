@@ -159,6 +159,70 @@ def emit_kinematic_rotation(
     emit(f"_kin_drv.driver.expression = 'frame * {angle_per_frame:.8f}'")
 
 
+def emit_framing_check(
+    emit: Callable[[str], None],
+    objects_var: str = "_dt_objects",
+    margin: float = 0.05,
+) -> None:
+    """Emit a framing auto-adjustment that zooms camera to fit all objects.
+
+    Iterates over all animation frames to find the worst-case bounding box
+    in screen space.  If content exceeds the margin, pulls the perspective
+    camera back (or adjusts ortho_scale) to fit.  If content is smaller,
+    zooms in.
+
+    Args:
+        emit:        Line emitter.
+        objects_var: Name of the Python list holding the mesh objects.
+        margin:      Fraction of frame to leave as border on each side.
+    """
+    emit("# ── Framing check (zoom to fit) ────────────────────────────")
+    emit("from bpy_extras.object_utils import world_to_camera_view")
+    emit(f"_framing_margin = {margin}")
+    emit("_framing_cam = scene.camera")
+    emit("if _framing_cam is not None:")
+    emit("    _fr_start = scene.frame_start")
+    emit("    _fr_end = scene.frame_end")
+    emit("    _gmin_x, _gmin_y = 1.0, 1.0")
+    emit("    _gmax_x, _gmax_y = 0.0, 0.0")
+    emit("    for _f in range(_fr_start, _fr_end + 1):")
+    emit("        scene.frame_set(_f)")
+    emit(f"        for _obj in {objects_var}:")
+    emit("            if _obj is None or _obj.type != 'MESH' or _obj.hide_render:")
+    emit("                continue")
+    emit("            for _corner in _obj.bound_box:")
+    emit("                _wpt = _obj.matrix_world @ mathutils.Vector(_corner)")
+    emit("                _co = world_to_camera_view(scene, _framing_cam, _wpt)")
+    emit("                _gmin_x = min(_gmin_x, _co.x)")
+    emit("                _gmin_y = min(_gmin_y, _co.y)")
+    emit("                _gmax_x = max(_gmax_x, _co.x)")
+    emit("                _gmax_y = max(_gmax_y, _co.y)")
+    emit("    _cw = _gmax_x - _gmin_x")
+    emit("    _ch = _gmax_y - _gmin_y")
+    emit("    _tw = 1.0 - 2 * _framing_margin")
+    emit("    _th = 1.0 - 2 * _framing_margin")
+    emit("    if _cw > 0 and _ch > 0:")
+    emit("        _scale = max(_cw / _tw, _ch / _th)")
+    emit("        if _framing_cam.data.type == 'ORTHO':")
+    emit("            _framing_cam.data.ortho_scale *= _scale")
+    emit("            print(f'  Framing: adjusted ortho_scale by {_scale:.3f}')")
+    emit("        else:")
+    emit("            _view_dir = _framing_cam.matrix_world.to_quaternion() @ mathutils.Vector((0, 0, -1))")
+    emit("            _pull = (_scale - 1.0) * _framing_cam.location.length * 0.5")
+    emit("            _framing_cam.location -= _view_dir * _pull")
+    emit("            # Re-aim at scene center")
+    emit("            _center = sum((_obj.location for _obj in "
+         f"{objects_var} if _obj and _obj.type == 'MESH'), mathutils.Vector()) / "
+         f"max(1, sum(1 for _o in {objects_var} if _o and _o.type == 'MESH'))")
+    emit("            _dir = _center - _framing_cam.location")
+    emit("            _framing_cam.rotation_euler = _dir.to_track_quat('-Z', 'Y').to_euler()")
+    emit("            print(f'  Framing: adjusted camera by factor {_scale:.3f}')")
+    emit("    else:")
+    emit("        print('  Framing: no visible content.')")
+    emit("    scene.frame_set(_fr_start)")
+    emit()
+
+
 def emit_lighting_check(emit: Callable[[str], None], check_frame: int = -1) -> None:
     """Emit a lighting auto-adjustment pass into the Blender script.
 

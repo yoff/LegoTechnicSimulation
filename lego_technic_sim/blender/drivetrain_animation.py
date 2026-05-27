@@ -18,6 +18,7 @@ from .geometry import (
     ldraw_to_blender as _ldraw_to_blender,
     collect_geometry,
     collect_geometry_colored,
+    emit_framing_check,
     emit_kinematic_rotation,
     emit_lighting_check,
     parse_ldconfig,
@@ -526,45 +527,9 @@ def generate_drivetrain_animation(
     emit("tree.links.new(rl.outputs['Image'], comp.inputs['Image'])")
     emit()
 
-    # Framing auto-adjustment (zoom to fit at final frame)
+    # Framing auto-adjustment (zoom to fit across all frames)
     if presentation:
-        emit("# ── Framing check (zoom to fit) ────────────────────────────")
-        emit("from bpy_extras.object_utils import world_to_camera_view")
-        emit(f"scene.frame_set({total_frames})")
-        emit("_cam = scene.camera")
-        emit("_margin = 0.05")
-        emit("_min_x, _min_y = 1.0, 1.0")
-        emit("_max_x, _max_y = 0.0, 0.0")
-        emit("for _obj in _dt_objects:")
-        emit("    if _obj.type != 'MESH' or _obj.hide_render:")
-        emit("        continue")
-        emit("    for _corner in _obj.bound_box:")
-        emit("        _wpt = _obj.matrix_world @ mathutils.Vector(_corner)")
-        emit("        _co = world_to_camera_view(scene, _cam, _wpt)")
-        emit("        _min_x = min(_min_x, _co.x)")
-        emit("        _min_y = min(_min_y, _co.y)")
-        emit("        _max_x = max(_max_x, _co.x)")
-        emit("        _max_y = max(_max_y, _co.y)")
-        emit("_content_w = _max_x - _min_x")
-        emit("_content_h = _max_y - _min_y")
-        emit("_target_w = 1.0 - 2 * _margin")
-        emit("_target_h = 1.0 - 2 * _margin")
-        emit("if _content_w > 0 and _content_h > 0:")
-        emit("    _scale = max(_content_w / _target_w, _content_h / _target_h)")
-        emit("    if abs(_scale - 1.0) > 0.01:")
-        emit("        # Pull camera: closer if _scale < 1, further if > 1")
-        emit("        _view_dir = _cam.matrix_world.to_quaternion() @ mathutils.Vector((0, 0, -1))")
-        emit("        _dist = (_cam.location - mathutils.Vector(("
-             f"{cx:.6f}, {cy:.6f}, {cz:.6f}))).length")
-        emit("        _cam.location -= _view_dir * (_dist * (_scale - 1.0))")
-        emit("        # Re-aim at center")
-        emit(f"        _direction = mathutils.Vector(({cx:.6f}, {cy:.6f}, {cz:.6f})) - _cam.location")
-        emit("        _cam.rotation_euler = _direction.to_track_quat('-Z', 'Y').to_euler()")
-        emit("        print(f'  Framing: adjusted camera by factor {_scale:.3f}')")
-        emit("    else:")
-        emit("        print(f'  Framing OK (scale={_scale:.3f})')")
-        emit("scene.frame_set(1)")
-        emit()
+        emit_framing_check(emit, objects_var="_dt_objects", margin=0.05)
 
     # Lighting auto-adjustment (presentation mode)
     if presentation:
