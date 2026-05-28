@@ -240,13 +240,20 @@ def generate_blender_script(
         emit("# ── Lighting ───────────────────────────────────────────────")
         emit(f"bpy.ops.object.light_add(type='SUN', location=(0, 0, {cam_distance:.2f}))")
         emit("_sun = bpy.context.active_object")
-        emit("_sun.data.energy = 3.0")
+        emit("_sun.data.energy = 1.5")
+        emit("_sun.data.angle = 0.2")
+        emit(f"bpy.ops.object.light_add(type='AREA', location=("
+             f"{cx:.4f}, {cy - cam_distance * 0.7:.4f}, {cz:.4f}))")
+        emit("_fill = bpy.context.active_object")
+        emit("_fill.data.energy = 8.0")
+        emit("_fill.data.size = 0.5")
+        emit(f"_fill.rotation_euler = (1.3, 0, 0)")
         emit("world = bpy.data.worlds.get('World') or bpy.data.worlds.new('World')")
         emit("scene.world = world")
         emit("world.use_nodes = True")
         emit("bg = world.node_tree.nodes.get('Background')")
         emit("if bg:")
-        emit("    bg.inputs[0].default_value = (0.05, 0.05, 0.08, 1.0)")
+        emit("    bg.inputs[0].default_value = (0.0, 0.0, 0.0, 1.0)")
         emit()
 
     # ------------------------------------------------------------------
