@@ -68,8 +68,8 @@ with open('${BASE_SCRIPT}') as f:
     script = f.read()
 
 # Resolution 150x150
-script = script.replace('scene.render.resolution_x = 1280', 'scene.render.resolution_x = 150')
-script = script.replace('scene.render.resolution_y = 720', 'scene.render.resolution_y = 150')
+script = script.replace('scene.render.resolution_x = 1280', 'scene.render.resolution_x = 220')
+script = script.replace('scene.render.resolution_y = 720', 'scene.render.resolution_y = 220')
 
 # PNG frames with transparency
 script = script.replace(

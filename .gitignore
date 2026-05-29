@@ -31,8 +31,11 @@ Thumbs.db
 
 sample_models/
 *.mp4
+*.webm
 !walker1_drivetrain_pres.mp4
+!walker1_drivetrain_pres.webm
 !walker1_cycle_*.mp4
+!walker1_cycle_*.webm
 
 # Generated Blender scripts (contain inline mesh data, very large)
 walker1_*.py
