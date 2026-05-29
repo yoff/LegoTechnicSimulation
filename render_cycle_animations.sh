@@ -89,7 +89,7 @@ _cam.data.clip_start = 0.001
 _cam.data.clip_end = 100.0
 _target = mathutils.Vector((-0.007200, 0.000000, 0.007072))
 _direction = _target - _cam.location
-_cam.rotation_euler = _direction.to_track_quat(\"-Z\", \"Y\").to_euler()'''
+_cam.rotation_euler = _direction.to_track_quat('-Z', 'Y').to_euler()'''
 
 new_camera = '''$camera_code'''
 
