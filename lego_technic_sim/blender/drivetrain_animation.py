@@ -164,12 +164,14 @@ def generate_drivetrain_animation(
     if presentation:
         emit(f"bpy.ops.object.light_add(type='SUN', location=(0, 0, {cam_distance:.2f}))")
         emit("_sun = bpy.context.active_object")
-        emit("_sun.data.energy = 2.0")
+        emit("_sun.data.energy = 1.5")
+        emit("_sun.data.angle = 0.2")
         emit(f"bpy.ops.object.light_add(type='AREA', location=("
-             f"{cx:.4f}, {cy - cam_distance * 0.5:.4f}, {cz + cam_distance * 0.3:.4f}))")
+             f"{cx:.4f}, {cy - cam_distance * 0.7:.4f}, {cz:.4f}))")
         emit("_fill = bpy.context.active_object")
-        emit("_fill.data.energy = 15.0")
-        emit("_fill.data.size = 1.0")
+        emit("_fill.data.energy = 8.0")
+        emit("_fill.data.size = 0.5")
+        emit(f"_fill.rotation_euler = (1.3, 0, 0)")
         emit("world = bpy.data.worlds.get('World') or bpy.data.worlds.new('World')")
         emit("scene.world = world")
         emit("world.use_nodes = True")
