@@ -173,6 +173,18 @@ def _build_parser() -> argparse.ArgumentParser:
         ),
     )
     p.add_argument(
+        "--gltf",
+        type=str,
+        default=None,
+        metavar="PATH",
+        help=(
+            "Export the animated simulation as a glTF/GLB file for "
+            "interactive 3D viewing in a web browser. Runs the physics "
+            "simulation, bakes keyframes, then exports to the given path "
+            "(use .glb for binary or .gltf for JSON)."
+        ),
+    )
+    p.add_argument(
         "--mujoco",
         action="store_true",
         help=(
@@ -321,14 +333,16 @@ def main(argv: list[str] | None = None) -> None:
             ldraw_library=ldraw_library,
             **kwargs,
         )
-    elif args.simulate:
+    elif args.simulate or args.gltf:
         from lego_technic_sim.blender.exporter import generate_blender_script
 
         sim_frames = args.sim_frames
         kwargs = dict(
-            render=True,
+            render=not args.gltf,
             sim_frames=sim_frames,
         )
+        if args.gltf:
+            kwargs["gltf_export"] = args.gltf
         if args.fast:
             kwargs.update(
                 resolution_x=480,

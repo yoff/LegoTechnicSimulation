@@ -70,6 +70,7 @@ def generate_blender_script(
     collision_mode: str = "convex_hull",
     model_path: Optional[Path] = None,
     ldraw_library: Optional[Path] = None,
+    gltf_export: Optional[str] = None,
 ) -> str:
     """Generate a Blender Python script for the given physics scene.
 
@@ -95,6 +96,8 @@ def generate_blender_script(
                      imports the package and parses the model at render time
                      instead of embedding geometry inline.
         ldraw_library: Absolute path to the LDraw parts library root.
+        gltf_export: If provided, export the animated scene to a glTF/GLB
+                     file at this path after baking the simulation.
 
     Returns:
         The generated Python script as a string.
@@ -1145,16 +1148,17 @@ def generate_blender_script(
     # ------------------------------------------------------------------
     # Lighting check – renders a tiny test frame and adjusts light energy.
     # ------------------------------------------------------------------
-    if _runtime_geometry:
+    if _runtime_geometry and not gltf_export:
         emit_lighting_check(emit)
 
     # ------------------------------------------------------------------
     # Framing check – projects all unit bounding boxes into camera space
     # across every frame and auto-adjusts camera if content exceeds frame.
     # ------------------------------------------------------------------
-    emit()
-    emit_framing_check(emit, objects_var="_units", margin=0.03)
-    emit()
+    if not gltf_export:
+        emit()
+        emit_framing_check(emit, objects_var="_units", margin=0.03)
+        emit()
 
     if render:
         emit()
@@ -1162,8 +1166,65 @@ def generate_blender_script(
         emit("print(f'Rendering {scene.frame_end} frames...')")
         emit("bpy.ops.render.render(animation=True)")
         emit("print('Simulation render complete.')")
-    else:
+    elif not gltf_export:
         emit("print('LegoTechnicSimulation: scene ready.')")
+
+    # ------------------------------------------------------------------
+    # glTF export – bake all object transforms and export animated .glb
+    # ------------------------------------------------------------------
+    if gltf_export:
+        emit()
+        emit("# ── glTF Export ────────────────────────────────────────────")
+        emit("print('Baking animation for glTF export...')")
+        emit("# Collect all unit mesh objects")
+        emit("_export_objects = [obj for obj in _units if obj is not None]")
+        emit("# Also collect ground plane if present")
+        emit("if '_ground' in dir() and _ground is not None:")
+        emit("    _export_objects.append(_ground)")
+        emit()
+        emit("# Select only export objects")
+        emit("bpy.ops.object.select_all(action='DESELECT')")
+        emit("for obj in _export_objects:")
+        emit("    obj.select_set(True)")
+        emit()
+        emit("# Bake visual transforms to keyframes for all frames")
+        emit("bpy.context.view_layer.objects.active = _export_objects[0]")
+        emit("bpy.ops.nla.bake(")
+        emit("    frame_start=scene.frame_start,")
+        emit("    frame_end=scene.frame_end,")
+        emit("    only_selected=True,")
+        emit("    visual_keying=True,")
+        emit("    clear_constraints=True,")
+        emit("    clear_parents=True,")
+        emit("    use_current_action=True,")
+        emit("    bake_types={'OBJECT'},")
+        emit(")")
+        emit("print('Keyframe bake complete.')")
+        emit()
+        emit("# Remove rigid body world (not needed in glTF)")
+        emit("if scene.rigidbody_world:")
+        emit("    bpy.ops.rigidbody.world_remove()")
+        emit()
+        emit("# Remove armatures and non-mesh objects from export set")
+        emit("bpy.ops.object.select_all(action='DESELECT')")
+        emit("for obj in _export_objects:")
+        emit("    if obj.type == 'MESH':")
+        emit("        obj.select_set(True)")
+        emit()
+        emit("# Export as glTF")
+        gltf_path = str(gltf_export)
+        emit(f"_gltf_path = r'{gltf_path}'")
+        emit("bpy.ops.export_scene.gltf(")
+        emit("    filepath=_gltf_path,")
+        emit("    use_selection=True,")
+        emit("    export_format='GLB' if _gltf_path.endswith('.glb') else 'GLTF_SEPARATE',")
+        emit("    export_animations=True,")
+        emit("    export_frame_range=True,")
+        emit("    export_nla_strips=False,")
+        emit("    export_current_frame=False,")
+        emit("    export_apply=True,")
+        emit(")")
+        emit(f"print(f'glTF exported to: {{_gltf_path}}')")
 
     script = "\n".join(lines)
 
